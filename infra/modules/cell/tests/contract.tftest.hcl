@@ -44,16 +44,10 @@ mock_provider "google" {
       id = "projects/cb-test/global/networks/cb-gcp-test"
     }
   }
-  mock_resource "google_container_cluster" {
-    defaults = {
-      master_auth = [{ cluster_ca_certificate = "Y2E=", client_certificate = "", client_key = "", client_certificate_config = [] }]
-    }
-  }
-  mock_resource "google_memorystore_instance" {
-    defaults = {
-      endpoints = [{ connections = [{ psc_auto_connection = [{ ip_address = "10.0.0.5" }] }] }]
-    }
-  }
+  # No defaults for google_container_cluster.master_auth or google_memorystore_instance.endpoints:
+  # OpenTofu validates mock values against the full schema (a block can't take a list; every
+  # required nested field must be given), and Terraform never applied them anyway. The GKE output
+  # tolerates an empty master_auth with try(), and the managed runs use plan, where endpoints stay unknown.
 }
 
 mock_provider "random" {}

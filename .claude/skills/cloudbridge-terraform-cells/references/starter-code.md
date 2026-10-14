@@ -384,16 +384,10 @@ mock_provider "google" {
       id = "projects/cb-test/global/networks/cb-gcp-test"
     }
   }
-  mock_resource "google_container_cluster" {
-    defaults = {
-      master_auth = [{ cluster_ca_certificate = "Y2E=", client_certificate = "", client_key = "", client_certificate_config = [] }]
-    }
-  }
-  mock_resource "google_memorystore_instance" {
-    defaults = {
-      endpoints = [{ connections = [{ psc_auto_connection = [{ ip_address = "10.0.0.5" }] }] }]
-    }
-  }
+  # No defaults for google_container_cluster.master_auth or google_memorystore_instance.endpoints:
+  # OpenTofu validates mock values against the full schema (a block can't take a list; every
+  # required nested field must be given), and Terraform never applied them anyway. The GKE output
+  # tolerates an empty master_auth with try(), and the managed runs use plan, where endpoints stay unknown.
 }
 
 mock_provider "random" {}
@@ -1929,6 +1923,7 @@ run "aws_budget_cell_plans_offline" {
 
 **Mock-provider lessons from making the contract test actually run** (it had only been format-checked before):
 - Mock only *computed* attributes. A default for a configured block (`vpc_config` on `aws_eks_cluster`) is rejected.
+- **OpenTofu is stricter than Terraform about mocks:** it validates every mock default against the full schema (a block can't take a list; all required nested fields must be present), where Terraform silently ignores a bad default. Keep mock defaults minimal and run the contract test on both engines — CI caught two defaults that only Terraform accepted.
 - Values a provider validates still need a realistic shape under mocks: `aws_iam_policy_document.json = "{}"`, IAM role `arn`, and a network self-link for `google_compute_network.id` (Cloud SQL's `private_network` regex).
 - Resources with `prevent_destroy` (RDS, Cloud SQL, caches) can't be torn down by `terraform test`, so the managed-profile runs use `command = plan`; the budget runs `apply`.
 - Don't hard-index optional computed blocks in outputs (`master_auth[0]` is empty until GKE fills it); wrap them in `try()`.
