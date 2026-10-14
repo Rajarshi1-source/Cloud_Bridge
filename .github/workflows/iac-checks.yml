@@ -1,0 +1,50 @@
+# Offline infrastructure checks on every PR that touches IaC: no cloud credentials, no state.
+# Runs the same harness developers run locally (tools/dev/iac-check.sh), so CI and laptops agree.
+#   terraform: fmt, validate, contract test + offline stack plans (Terraform 1.15)
+#   tofu:      validate + the same tests on OpenTofu 1.12 (proves the modules stay engine-agnostic)
+#   actions:   actionlint on every workflow
+#   ansible:   ansible-lint production profile + playbook syntax check
+#   molecule:  k3s_server role converge + idempotence + verify in a container
+name: iac-checks
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - "ansible/**"
+      - ".github/workflows/**"
+      - "tools/dev/iac-check.sh"
+      - "tools/dev/ansible-toolbox.Dockerfile"
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "ansible/**"
+      - ".github/workflows/**"
+      - "tools/dev/iac-check.sh"
+      - "tools/dev/ansible-toolbox.Dockerfile"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iac-checks-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [terraform, tofu, actions, ansible, molecule]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run ${{ matrix.check }} checks
+        env:
+          CHECK: ${{ matrix.check }}
+        run: bash tools/dev/iac-check.sh "$CHECK"

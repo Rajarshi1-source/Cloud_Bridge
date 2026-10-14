@@ -1,0 +1,12 @@
+---
+# Configures the budget-profile VMs Terraform tagged cb-ansible-role = k3s_server, on both clouds.
+# Week 2 adds origin_tls and argocd_autodeploy (they need gitops/ and the Cloudflare origin cert),
+# plus the /healthz/cell smoke test through each origin.
+- name: Configure budget-profile k3s cells
+  hosts: all
+  gather_facts: true
+  roles:
+    - base_hardening
+    - k3s_server
+    - registries_mirror
+    - node_exporter

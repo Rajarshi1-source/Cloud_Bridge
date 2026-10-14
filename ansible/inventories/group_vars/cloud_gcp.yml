@@ -1,0 +1,12 @@
+---
+# SSH only through IAP TCP forwarding (firewall admits 35.235.240.0/20 on 22), OS Login user.
+ansible_connection: ansible.builtin.ssh
+ansible_user: "{{ lookup('ansible.builtin.env', 'GCP_OSLOGIN_USER') }}"
+cb_gcp_project: "{{ lookup('ansible.builtin.env', 'GCP_PROJECT_ID') }}"
+ansible_ssh_common_args: >-
+  -o StrictHostKeyChecking=accept-new
+  -o ProxyCommand="gcloud compute start-iap-tunnel %h 22 --listen-on-stdin
+  --zone={{ gcp_zone | basename }} --project={{ cb_gcp_project }}"
+ansible_become: true
+cb_cloud: gcp
+cb_secret_backend: gcp

@@ -28,6 +28,11 @@
 	</scm>
 	<properties>
 		<java.version>21</java.version>
+		<!-- Security overrides of Boot 4.1.1's managed versions (Trivy, 14 Oct 2026). Remove each one
+		     once a Boot 4.1.x patch manages the same or newer version. -->
+		<tomcat.version>11.0.25</tomcat.version>              <!-- CVE-2026-65182 (CRITICAL) -->
+		<jackson-bom.version>3.1.7</jackson-bom.version>       <!-- CVE-2026-89407, CVE-2026-68497 -->
+		<jackson-2-bom.version>2.21.7</jackson-2-bom.version>  <!-- same CVEs, Jackson 2 line -->
 		<spring-cloud.version>2025.1.3</spring-cloud.version>
 	</properties>
 	<dependencies>

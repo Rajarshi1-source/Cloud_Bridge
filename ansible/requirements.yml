@@ -1,0 +1,14 @@
+---
+# Exact collection versions (resolved 14 Oct 2026). Bump deliberately, then re-run
+# tools/dev/iac-check.sh ansible molecule.
+collections:
+  - name: amazon.aws
+    version: "12.0.0"
+  - name: community.aws          # aws_ssm connection plugin
+    version: "12.0.0"
+  - name: google.cloud
+    version: "1.15.0"
+  - name: ansible.posix
+    version: "2.2.2"
+  - name: community.general      # community.general.terraform for the evacuation saga (Week 7)
+    version: "13.5.0"

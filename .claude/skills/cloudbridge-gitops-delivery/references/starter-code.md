@@ -125,7 +125,7 @@ volumes:
 
 ```dockerfile
 # syntax=docker/dockerfile:1.7
-FROM eclipse-temurin:21-jdk AS build
+FROM eclipse-temurin:21-jdk-noble AS build
 WORKDIR /src
 COPY mvnw pom.xml ./
 COPY .mvn .mvn
@@ -134,7 +134,9 @@ COPY src src
 RUN --mount=type=cache,target=/root/.m2 ./mvnw -q -DskipTests package \
  && java -Djarmode=tools -jar target/*.jar extract --layers --launcher --destination /out
 
-FROM eclipse-temurin:21-jre
+# Pin the Ubuntu codename: the unpinned 21-jre tag moved to Ubuntu 26.04, which ships /usr/bin/pebble
+# (a Go binary with HIGH stdlib CVEs this image never runs) and failed the Trivy gate.
+FROM eclipse-temurin:21-jre-noble
 RUN useradd --uid 10001 --create-home app
 WORKDIR /app
 COPY --from=build /out/dependencies/ ./
@@ -505,19 +507,30 @@ if __name__ == "__main__":
 
 ## 7. .github/workflows/ci-app.yml
 
+The build job below is the implemented, actionlint-clean workflow (SHAs resolved 14 Oct 2026; Dependabot keeps them current). Points the earlier draft got wrong:
+- **PR builds use `load: true`, and the docker exporter can't carry attestations**, so `provenance`/`sbom` must be off on PRs (`'false'`) and on only for the pushed image. Otherwise every PR build fails.
+- `vars.DOCKERHUB_USER` is empty until configured (and on forks), which makes an invalid tag (`docker.io//cb-…`); fall back to a placeholder.
+- Least privilege: the workflow is `contents: read`; only the build job gets `id-token: write` (cosign keyless). `persist-credentials: false` on checkout.
+- Untrusted-looking values (`steps.build.outputs.digest`, matrix values) go through `env:` into `run:`, never `${{ }}` inside the script.
+
 ```yaml
+# Build, test, scan, sign and publish the cell services.
+# PR: verify (unit + Testcontainers ITs) and a local image build + Trivy scan, nothing pushed.
+# main: the same, then push to Docker Hub, attach SBOM + provenance, cosign keyless sign BY DIGEST,
+#       and upload each digest as an artifact (the canary-ring bump job arrives with gitops/ in Week 2).
+# Repository setup: variable DOCKERHUB_USER, secret DOCKERHUB_TOKEN (Docker Hub access token).
+# Every action is pinned to a full commit SHA (tag comment for humans); Dependabot bumps them.
 name: app
+
 on:
   pull_request:
-    paths: ["services/**"]
+    paths: ["services/**", ".github/workflows/ci-app.yml"]
   push:
     branches: [main]
-    paths: ["services/**"]
+    paths: ["services/**", ".github/workflows/ci-app.yml"]
 
 permissions:
-  contents: write
-  id-token: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: app-${{ github.ref }}
@@ -526,74 +539,113 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # cosign keyless signing (Sigstore OIDC); no long-lived signing key
     strategy:
       fail-fast: false
       matrix:
         service: [api-gateway, order-service, inventory-service]
     env:
-      IMAGE: docker.io/${{ vars.DOCKERHUB_USER }}/cb-${{ matrix.service }}
+      IMAGE: docker.io/${{ vars.DOCKERHUB_USER || 'cloudbridge' }}/cb-${{ matrix.service }}
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/setup-java@<sha>
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
-      - name: Unit + Testcontainers
+
+      - name: Unit + Testcontainers ITs
         working-directory: services/${{ matrix.service }}
-        run: ./mvnw -B verify
-      - uses: docker/setup-buildx-action@<sha>
-      - uses: docker/login-action@<sha>
-        if: github.ref == 'refs/heads/main'
+        run: ./mvnw -B -ntp verify
+
+      - name: Test reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-reports-${{ matrix.service }}
+          path: |
+            services/${{ matrix.service }}/target/surefire-reports/
+            services/${{ matrix.service }}/target/failsafe-reports/
+          retention-days: 7
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: env.PUBLISH == 'true'
         with:
           username: ${{ vars.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - id: build
-        uses: docker/build-push-action@<sha>
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: services/${{ matrix.service }}
-          load: ${{ github.ref != 'refs/heads/main' }}
-          push: ${{ github.ref == 'refs/heads/main' }}
           tags: ${{ env.IMAGE }}:${{ github.sha }}
-          provenance: mode=max
-          sbom: true
+          # PRs load the image into the runner's Docker for scanning. The docker exporter can't
+          # carry attestations, so SBOM + provenance are attached only to the pushed image.
+          load: ${{ env.PUBLISH != 'true' }}
+          push: ${{ env.PUBLISH == 'true' }}
+          provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.PUBLISH == 'true' }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
-      - name: Trivy image scan
-        uses: aquasecurity/trivy-action@<sha>
+
+      - name: Trivy image scan (HIGH/CRITICAL with a fix available fails the build)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:${{ github.sha }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: sigstore/cosign-installer@<sha>
-        if: github.ref == 'refs/heads/main'
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: env.PUBLISH == 'true'
+
       - name: Sign by digest (keyless)
-        if: github.ref == 'refs/heads/main'
-        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
       - name: Save digest
-        if: github.ref == 'refs/heads/main'
-        run: echo "${{ matrix.service }}=${{ steps.build.outputs.digest }}" > digest-${{ matrix.service }}.env
-      - uses: actions/upload-artifact@<sha>
-        if: github.ref == 'refs/heads/main'
+        if: env.PUBLISH == 'true'
+        env:
+          SERVICE: ${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: echo "${SERVICE}=${DIGEST}" > "digest-${SERVICE}.env"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: env.PUBLISH == 'true'
         with:
           name: digest-${{ matrix.service }}
           path: digest-${{ matrix.service }}.env
+          retention-days: 30
 
+  # Added in Week 2, once gitops/releases/ and tools/bump_ring.py exist:
   promote-canary:
     needs: build
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/download-artifact@<sha>
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@<sha> # pin like the others
         with:
           pattern: digest-*
           merge-multiple: true
       - run: cat digest-*.env > digests.env && pip install pyyaml && python3 tools/bump_ring.py --ring ring-canary --digests digests.env
         env:
           DOCKERHUB_USER: ${{ vars.DOCKERHUB_USER }}
-      - uses: peter-evans/create-pull-request@<sha>
+      - uses: peter-evans/create-pull-request@<sha> # pin like the others
         with:
           branch: release/canary-${{ github.sha }}
           title: "release(canary): ${{ github.sha }} → GCP ring"

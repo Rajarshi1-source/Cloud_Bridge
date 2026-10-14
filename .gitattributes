@@ -1,2 +1,13 @@
 # Shell scripts run in WSL/Linux and CI: always LF
 *.sh text eol=lf
+# IaC and config run in Linux tooling (terraform fmt, make, ansible, CI): keep them LF everywhere
+*.tf text eol=lf
+*.tfvars text eol=lf
+*.hcl text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.j2 text eol=lf
+*.cfg text eol=lf
+*.Dockerfile text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf

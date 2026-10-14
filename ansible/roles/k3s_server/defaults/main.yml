@@ -1,0 +1,11 @@
+---
+k3s_server_version: "v1.36.5+k3s1"
+k3s_server_minor: "1.36"
+# Restart k3s when its config changes. Off only where no systemd/k3s exists (the Molecule container).
+k3s_server_manage_service: true
+k3s_server_disable:
+  - traefik            # Traefik is installed by Argo CD (one owner per object)
+k3s_server_kubelet_args:
+  - "kube-reserved=cpu=100m,memory=256Mi"
+  - "system-reserved=cpu=100m,memory=128Mi"
+  - "eviction-hard=memory.available<100Mi"

@@ -16,7 +16,7 @@ Full files — compose, Dockerfile, chart templates, AnalysisTemplate, Applicati
 | Component | Pin |
 |---|---|
 | Spring Boot / Java / build | 4.1.x (floating patch) / Java 21 / Maven wrapper |
-| Base images | `eclipse-temurin:21-jdk` build → `eclipse-temurin:21-jre` run |
+| Base images | `eclipse-temurin:21-jdk-noble` build → `eclipse-temurin:21-jre-noble` run. Pin the Ubuntu codename: the bare `21-jre` tag silently moved to 26.04 and brought a vulnerable `/usr/bin/pebble` that failed the Trivy gate. When Trivy flags a Boot-managed library (Tomcat, Jackson) before a Boot patch exists, override Boot's version property (`tomcat.version`, `jackson-bom.version`, `jackson-2-bom.version`) with a dated comment, and remove it once Boot catches up |
 | Postgres / Valkey (compose + budget in-cluster) | `postgres:18.4-alpine` / `valkey/valkey:9.0-alpine` |
 | Argo CD | 3.3.x — upgrades require Server-Side Apply (`ServerSideApply=true`) because the ApplicationSet CRD exceeds client-side annotation limits |
 | Argo Rollouts, Helm | Helm 4.2.x; Rollouts pinned in `platform-addons` chart — verify current on build day |

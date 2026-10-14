@@ -1,0 +1,21 @@
+---
+plugin: google.cloud.gcp_compute
+projects:
+  - "{{ lookup('ansible.builtin.env', 'GCP_PROJECT_ID') }}"
+zones:
+  - asia-south1-a
+filters:
+  - labels.cb-ansible-role = k3s_server
+  - status = RUNNING
+auth_kind: application        # Workload Identity Federation credentials from google-github-actions/auth
+hostnames:
+  - name
+keyed_groups:
+  - key: labels['cb-env']
+    prefix: env
+  - key: labels['cb-cloud']
+    prefix: cloud
+compose:
+  cb_cell: labels['cb-cell']
+  cb_origin_ip: networkInterfaces[0].accessConfigs[0].natIP
+  gcp_zone: zone

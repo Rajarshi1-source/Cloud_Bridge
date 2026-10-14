@@ -1,0 +1,24 @@
+---
+# Pods pull through an authenticated Docker Hub endpoint, so anonymous rate limits can't stall a
+# scale-up. The token comes from the cell's own cloud secret manager, never from a vars file.
+- name: Read the Docker Hub pull token
+  ansible.builtin.set_fact:
+    registries_mirror_token: >-
+      {{ lookup('amazon.aws.secretsmanager_secret', 'cb/dockerhub-pull', region='ap-south-1')
+         if cb_secret_backend == 'aws' else
+         lookup('google.cloud.gcp_secret_manager', key='cb-dockerhub-pull',
+                project=lookup('ansible.builtin.env', 'GCP_PROJECT_ID'), auth_kind='application') }}
+  no_log: true
+
+- name: Configure k3s registries.yaml
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/registries.yaml
+    mode: "0600"
+    content: |
+      configs:
+        "registry-1.docker.io":
+          auth:
+            username: "{{ lookup('ansible.builtin.env', 'DOCKERHUB_USER') }}"
+            password: "{{ registries_mirror_token }}"
+  no_log: true
+  notify: Restart k3s for registries
