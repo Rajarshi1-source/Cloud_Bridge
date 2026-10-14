@@ -1,0 +1,22 @@
+# Keeps the SHA-pinned GitHub Actions and the service dependencies current. Every bump is a PR
+# that runs the full CI (tests + Trivy) before anyone merges it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: maven
+    directories:
+      - /services/api-gateway
+      - /services/order-service
+      - /services/inventory-service
+    schedule:
+      interval: weekly
+    groups:
+      spring:
+        patterns: ["org.springframework*", "io.github.resilience4j*"]

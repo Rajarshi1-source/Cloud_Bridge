@@ -1,0 +1,21 @@
+---
+# The configuration half of the role. Molecule converges exactly these tasks (k3s itself can't run
+# in an unprivileged container), so the tested code is the code the VMs run.
+- name: Assert the pinned version matches the parity-contract minor
+  ansible.builtin.assert:
+    that: ("v" ~ k3s_server_minor ~ ".") in k3s_server_version
+    fail_msg: "k3s {{ k3s_server_version }} does not match contract minor {{ k3s_server_minor }}"
+    quiet: true
+
+- name: Ensure the k3s config directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0755"
+
+- name: Write the k3s config
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    mode: "0600"
+  notify: Restart k3s

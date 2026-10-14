@@ -79,7 +79,7 @@ Every pair must match vCPU, memory and CPU class. Rev 1 mapped `t3.large` (2/8) 
 
 **GKE** — zonal (`location = "<region>-a"`, eligible for GKE's free-tier management credit), `release_channel = REGULAR`, `min_master_version = var.k8s_version`, maintenance window at night IST, `datapath_provider = "ADVANCED_DATAPATH"` (NetworkPolicy enforced), private nodes + master authorized networks, dedicated node service account with only logWriter / metricWriter / monitoring.viewer / artifactregistry.reader, `workload_metadata_config.mode = GKE_METADATA`, shielded nodes, `deletion_protection = var.env == "prod"`.
 
-**k3s VM (budget profile)** — Terraform creates only the VM, static IP, firewall (443 from Cloudflare ranges, nothing else public), and tags/labels `cb-ansible-role = k3s_server`. No `remote-exec`/`local-exec`: Ansible discovers the VM by tag and configures it (see cloudbridge-ansible-ops). No public SSH — AWS uses SSM (instance profile with `AmazonSSMManagedInstanceCore`), GCP uses IAP (firewall allows `35.235.240.0/20` on 22).
+**k3s VM (budget profile)** — Terraform creates only the VM, static IP, firewall (443 from Cloudflare ranges, nothing else public), and tags/labels `cb-ansible-role = k3s_server`. The AWS module also creates the S3 transfer bucket Ansible's SSM connection needs. **Every live stack configures both providers** (the facade wires both clouds), so the other cloud's provider gets a placeholder config; read Cloudflare's ranges with the `http` provider so cell stacks hold no Cloudflare credentials (references §7b). No `remote-exec`/`local-exec`: Ansible discovers the VM by tag and configures it (see cloudbridge-ansible-ops). No public SSH — AWS uses SSM (instance profile with `AmazonSSMManagedInstanceCore`), GCP uses IAP (firewall allows `35.235.240.0/20` on 22).
 
 **Data services** — `prevent_destroy = true` on databases, caches and state buckets; DB passwords from `random_password` written straight to Secrets Manager / Secret Manager (outputs carry a `secret_ref`, never the password); Multi-AZ / regional HA only in prod.
 
@@ -93,7 +93,7 @@ Every pair must match vCPU, memory and CPU class. Rev 1 mapped `t3.large` (2/8) 
 
 ## Contract test (keep it green on both engines)
 
-`modules/cell/tests/contract.tftest.hcl` uses `mock_provider "aws" {}` and `mock_provider "google" {}` and `command = apply`, so it runs offline for free. It asserts: AWS and GCP (managed and budget) expose the same `cluster` keys; shapes are equal per size; `cloud = "azure"` is rejected (`expect_failures = [var.cloud]`). Add a run block whenever you add an implementation or an output key. CI runs it on Terraform 1.15 **and** OpenTofu 1.12.
+`modules/cell/tests/contract.tftest.hcl` uses `mock_provider "aws"` / `"google"` / `"random"`, so it runs offline for free: budget runs `apply`, managed runs `plan` (their data services carry `prevent_destroy`, which a test apply can't tear down). Mock only computed attributes and give provider-validated values (policy JSON, ARNs, network self-links) realistic shapes — see references §7b. Run everything with `bash tools/dev/iac-check.sh` (Terraform 1.15 + OpenTofu 1.12 in containers). It asserts: AWS and GCP (managed and budget) expose the same `cluster` keys; shapes are equal per size; `cloud = "azure"` is rejected (`expect_failures = [var.cloud]`). Add a run block whenever you add an implementation or an output key. CI runs it on Terraform 1.15 **and** OpenTofu 1.12.
 
 ## Workflows
 

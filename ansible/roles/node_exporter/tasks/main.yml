@@ -1,0 +1,47 @@
+---
+- name: Read the installed node_exporter version
+  ansible.builtin.command: /usr/local/bin/node_exporter --version
+  register: node_exporter_installed
+  changed_when: false
+  failed_when: false
+
+- name: Download and unpack the pinned release
+  ansible.builtin.unarchive:
+    src: "{{ node_exporter_url }}"
+    dest: /tmp
+    remote_src: true
+  when: node_exporter_version not in node_exporter_current
+
+- name: Install the binary
+  ansible.builtin.copy:
+    src: "/tmp/{{ node_exporter_release }}/node_exporter"
+    dest: /usr/local/bin/node_exporter
+    mode: "0755"
+    remote_src: true
+  when: node_exporter_version not in node_exporter_current
+  notify: Restart node_exporter
+
+- name: Install the systemd unit (localhost only; the in-cluster Prometheus agent scrapes it)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/node_exporter.service
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Prometheus node exporter
+      After=network-online.target
+
+      [Service]
+      DynamicUser=yes
+      ExecStart=/usr/local/bin/node_exporter --web.listen-address=127.0.0.1:9100
+      Restart=on-failure
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: Restart node_exporter
+
+- name: Enable and start node_exporter
+  ansible.builtin.systemd_service:
+    name: node_exporter
+    enabled: true
+    state: started
+    daemon_reload: true

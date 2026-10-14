@@ -1,0 +1,5 @@
+cloud   = "aws"
+profile = "budget"
+env     = "budget"
+region  = "ap-south-1"
+shape   = "small"

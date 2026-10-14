@@ -1,0 +1,9 @@
+---
+# No SSH anywhere: SSM Session Manager. The transfer bucket is a Terraform output of the AWS budget
+# stack (cluster.auth.transfer_bucket), exported as CB_SSM_BUCKET by the workflow that runs Ansible.
+ansible_connection: community.aws.aws_ssm
+ansible_aws_ssm_region: ap-south-1
+ansible_aws_ssm_bucket_name: "{{ lookup('ansible.builtin.env', 'CB_SSM_BUCKET') }}"
+ansible_become: true
+cb_cloud: aws
+cb_secret_backend: aws

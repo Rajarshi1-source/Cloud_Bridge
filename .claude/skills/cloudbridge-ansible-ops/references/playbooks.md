@@ -15,14 +15,20 @@
 
 ```yaml
 # ansible/requirements.yml — pin exact versions on build day (ansible-galaxy collection list)
+---
+# Exact collection versions (resolved 14 Oct 2026). Bump deliberately, then re-run
+# tools/dev/iac-check.sh ansible molecule.
 collections:
   - name: amazon.aws
-  - name: community.aws
+    version: "12.0.0"
+  - name: community.aws          # aws_ssm connection plugin
+    version: "12.0.0"
   - name: google.cloud
-  - name: kubernetes.core
-  - name: community.general
+    version: "1.15.0"
   - name: ansible.posix
-  - name: ansible.eda
+    version: "2.2.2"
+  - name: community.general      # community.general.terraform for the evacuation saga (Week 7)
+    version: "13.5.0"
 ```
 
 ```ini
@@ -44,6 +50,8 @@ pipelining = True
 
 ```yaml
 # ansible/inventories/aws_ec2.yml
+---
+# Hosts come from cloud tags Terraform set (cb-ansible-role = k3s_server), never from Terraform state.
 plugin: amazon.aws.aws_ec2
 regions:
   - ap-south-1
@@ -64,6 +72,7 @@ compose:
 
 ```yaml
 # ansible/inventories/gcp_compute.yml
+---
 plugin: google.cloud.gcp_compute
 projects:
   - "{{ lookup('ansible.builtin.env', 'GCP_PROJECT_ID') }}"
@@ -72,7 +81,7 @@ zones:
 filters:
   - labels.cb-ansible-role = k3s_server
   - status = RUNNING
-auth_kind: application
+auth_kind: application        # Workload Identity Federation credentials from google-github-actions/auth
 hostnames:
   - name
 keyed_groups:
@@ -88,9 +97,12 @@ compose:
 
 ```yaml
 # ansible/inventories/group_vars/cloud_aws.yml
+---
+# No SSH anywhere: SSM Session Manager. The transfer bucket is a Terraform output of the AWS budget
+# stack (cluster.auth.transfer_bucket), exported as CB_SSM_BUCKET by the workflow that runs Ansible.
 ansible_connection: community.aws.aws_ssm
 ansible_aws_ssm_region: ap-south-1
-ansible_aws_ssm_bucket_name: cb-ansible-ssm-transfer   # created by Terraform global stack
+ansible_aws_ssm_bucket_name: "{{ lookup('ansible.builtin.env', 'CB_SSM_BUCKET') }}"
 ansible_become: true
 cb_cloud: aws
 cb_secret_backend: aws
@@ -98,11 +110,15 @@ cb_secret_backend: aws
 
 ```yaml
 # ansible/inventories/group_vars/cloud_gcp.yml
+---
+# SSH only through IAP TCP forwarding (firewall admits 35.235.240.0/20 on 22), OS Login user.
 ansible_connection: ansible.builtin.ssh
 ansible_user: "{{ lookup('ansible.builtin.env', 'GCP_OSLOGIN_USER') }}"
+cb_gcp_project: "{{ lookup('ansible.builtin.env', 'GCP_PROJECT_ID') }}"
 ansible_ssh_common_args: >-
   -o StrictHostKeyChecking=accept-new
-  -o ProxyCommand="gcloud compute start-iap-tunnel %h 22 --listen-on-stdin --zone={{ gcp_zone | basename }} --project={{ lookup('ansible.builtin.env', 'GCP_PROJECT_ID') }}"
+  -o ProxyCommand="gcloud compute start-iap-tunnel %h 22 --listen-on-stdin
+  --zone={{ gcp_zone | basename }} --project={{ cb_gcp_project }}"
 ansible_become: true
 cb_cloud: gcp
 cb_secret_backend: gcp
@@ -110,9 +126,9 @@ cb_secret_backend: gcp
 
 ```yaml
 # ansible/inventories/group_vars/all.yml
-k3s_version: "v1.36.2+k3s1"
-k3s_minor: "1.36"
-node_exporter_version: "1.9.1"            # verify current on build day
+k3s_server_version: "v1.36.5+k3s1"        # role-prefixed names: ansible-lint production profile
+k3s_server_minor: "1.36"
+node_exporter_version: "1.12.1"
 argocd_chart_version: "8.0.0"             # argo-cd Helm chart for Argo CD 3.3.x — verify
 cb_ring: "{{ 'ring-canary' if cb_cloud == 'gcp' else 'ring-main' }}"
 cb_repo_url: "https://github.com/<you>/cloudbridge"
@@ -122,20 +138,24 @@ cb_repo_url: "https://github.com/<you>/cloudbridge"
 
 ```yaml
 # roles/base_hardening/tasks/main.yml
-- name: Disable SSH password authentication
-  ansible.builtin.lineinfile:
-    path: /etc/ssh/sshd_config.d/10-cloudbridge.conf
-    create: true
-    line: "{{ item }}"
+---
+- name: Disable SSH password and root login
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-cloudbridge.conf
     mode: "0644"
-  loop:
-    - "PasswordAuthentication no"
-    - "PermitRootLogin no"
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin no
   notify: Restart ssh
 
 - name: Install baseline packages
   ansible.builtin.apt:
-    name: [unattended-upgrades, auditd, chrony, curl, jq]
+    name:
+      - unattended-upgrades
+      - auditd
+      - chrony
+      - curl
+      - jq
     state: present
     update_cache: true
     cache_valid_time: 3600
@@ -160,23 +180,23 @@ cb_repo_url: "https://github.com/<you>/cloudbridge"
     - { name: kernel.kptr_restrict, value: "2" }
     - { name: vm.swappiness, value: "10" }
 
-- name: Create swapfile (2 GiB VMs + JVM start bursts)
+- name: Create a 1 GiB swapfile (2 GiB VMs + JVM start-up bursts)
   ansible.builtin.command: fallocate -l 1G /swapfile
   args:
     creates: /swapfile
 
-- name: Swapfile permissions
+- name: Restrict swapfile permissions
   ansible.builtin.file:
     path: /swapfile
     mode: "0600"
 
-- name: Format swap
+- name: Format the swapfile
   ansible.builtin.command: mkswap /swapfile
-  register: mkswap
-  changed_when: mkswap.rc == 0
-  when: ansible_swaptotal_mb | int == 0
+  register: base_hardening_mkswap
+  changed_when: base_hardening_mkswap.rc == 0
+  when: ansible_facts['swaptotal_mb'] | int == 0
 
-- name: Enable swap
+- name: Persist swap in fstab
   ansible.posix.mount:
     src: /swapfile
     path: none
@@ -184,11 +204,17 @@ cb_repo_url: "https://github.com/<you>/cloudbridge"
     opts: sw
     state: present
 
-- name: Activate swap now
+- name: Activate swap
   ansible.builtin.command: swapon -a
   changed_when: false
 
-- name: Cap journald
+- name: Ensure journald drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Cap journald disk use
   ansible.builtin.copy:
     dest: /etc/systemd/journald.conf.d/size.conf
     mode: "0644"
@@ -200,6 +226,7 @@ cb_repo_url: "https://github.com/<you>/cloudbridge"
 
 ```yaml
 # roles/base_hardening/handlers/main.yml
+---
 - name: Restart ssh
   ansible.builtin.service:
     name: ssh
@@ -213,8 +240,14 @@ cb_repo_url: "https://github.com/<you>/cloudbridge"
 
 ```yaml
 # roles/k3s_server/defaults/main.yml
-k3s_disable: [traefik]
-k3s_kubelet_args:
+---
+k3s_server_version: "v1.36.5+k3s1"
+k3s_server_minor: "1.36"
+# Restart k3s when its config changes. Off only where no systemd/k3s exists (the Molecule container).
+k3s_server_manage_service: true
+k3s_server_disable:
+  - traefik            # Traefik is installed by Argo CD (one owner per object)
+k3s_server_kubelet_args:
   - "kube-reserved=cpu=100m,memory=256Mi"
   - "system-reserved=cpu=100m,memory=128Mi"
   - "eviction-hard=memory.available<100Mi"
@@ -222,80 +255,98 @@ k3s_kubelet_args:
 
 ```jinja
 {# roles/k3s_server/templates/config.yaml.j2 #}
+# Managed by Ansible (role k3s_server). k3s reads this before it starts.
 write-kubeconfig-mode: "0600"
 tls-san:
   - "{{ cb_origin_ip }}"
-disable: {{ k3s_disable | to_json }}
-kubelet-arg: {{ k3s_kubelet_args | to_json }}
+disable: {{ k3s_server_disable | to_json }}
+kubelet-arg: {{ k3s_server_kubelet_args | to_json }}
 node-label:
   - "cb-cell={{ cb_cell }}"
   - "cb-cloud={{ cb_cloud }}"
 ```
 
 ```yaml
-# roles/k3s_server/tasks/main.yml
-- name: Ensure config directory
+# roles/k3s_server/tasks/config.yml
+---
+# The configuration half of the role. Molecule converges exactly these tasks (k3s itself can't run
+# in an unprivileged container), so the tested code is the code the VMs run.
+- name: Assert the pinned version matches the parity-contract minor
+  ansible.builtin.assert:
+    that: ("v" ~ k3s_server_minor ~ ".") in k3s_server_version
+    fail_msg: "k3s {{ k3s_server_version }} does not match contract minor {{ k3s_server_minor }}"
+    quiet: true
+
+- name: Ensure the k3s config directory
   ansible.builtin.file:
     path: /etc/rancher/k3s
     state: directory
     mode: "0755"
 
-- name: Write k3s config
+- name: Write the k3s config
   ansible.builtin.template:
     src: config.yaml.j2
     dest: /etc/rancher/k3s/config.yaml
     mode: "0600"
   notify: Restart k3s
+```
 
-- name: Read installed k3s version
+```yaml
+# roles/k3s_server/tasks/main.yml
+---
+- name: Configure k3s
+  ansible.builtin.import_tasks: config.yml
+
+- name: Read the installed k3s version
   ansible.builtin.command: k3s --version
-  register: k3s_installed
+  register: k3s_server_installed
   changed_when: false
   failed_when: false
 
-- name: Download k3s installer
+- name: Download the installer pinned to the k3s release (not the moving get.k3s.io script)
   ansible.builtin.get_url:
-    url: https://get.k3s.io
+    url: "https://raw.githubusercontent.com/k3s-io/k3s/{{ k3s_server_version | urlencode }}/install.sh"
     dest: /usr/local/bin/k3s-install.sh
     mode: "0755"
-  when: k3s_version not in (k3s_installed.stdout | default(''))
+  when: k3s_server_version not in (k3s_server_installed.stdout | default(''))
 
-- name: Install pinned k3s
+- name: Install the pinned k3s
   ansible.builtin.command: /usr/local/bin/k3s-install.sh
   environment:
-    INSTALL_K3S_VERSION: "{{ k3s_version }}"
-  when: k3s_version not in (k3s_installed.stdout | default(''))
+    INSTALL_K3S_VERSION: "{{ k3s_server_version }}"
+  when: k3s_server_version not in (k3s_server_installed.stdout | default(''))
   changed_when: true
 
-- name: Wait for node Ready
+- name: Wait for the node to be Ready
   ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=180s
   changed_when: false
-
-- name: Assert minor matches parity contract
-  ansible.builtin.assert:
-    that: k3s_minor in k3s_version
-    fail_msg: "k3s {{ k3s_version }} does not match contract minor {{ k3s_minor }}"
 ```
 
 ```yaml
 # roles/k3s_server/handlers/main.yml
+---
 - name: Restart k3s
   ansible.builtin.service:
     name: k3s
     state: restarted
+  when: k3s_server_manage_service | bool
 ```
 
 ```yaml
 # roles/registries_mirror/tasks/main.yml
-- name: Read Docker Hub pull token
+---
+# Pods pull through an authenticated Docker Hub endpoint, so anonymous rate limits can't stall a
+# scale-up. The token comes from the cell's own cloud secret manager, never from a vars file.
+- name: Read the Docker Hub pull token
   ansible.builtin.set_fact:
-    dockerhub_token: >-
+    registries_mirror_token: >-
       {{ lookup('amazon.aws.secretsmanager_secret', 'cb/dockerhub-pull', region='ap-south-1')
          if cb_secret_backend == 'aws' else
-         lookup('google.cloud.gcp_secret_manager', key='cb-dockerhub-pull', project=lookup('ansible.builtin.env','GCP_PROJECT_ID'), auth_kind='application') }}
+         lookup('google.cloud.gcp_secret_manager', key='cb-dockerhub-pull',
+                project=lookup('ansible.builtin.env', 'GCP_PROJECT_ID'), auth_kind='application') }}
   no_log: true
 
-- name: Configure registries.yaml
+- name: Configure k3s registries.yaml
   ansible.builtin.copy:
     dest: /etc/rancher/k3s/registries.yaml
     mode: "0600"
@@ -304,36 +355,55 @@ node-label:
         "registry-1.docker.io":
           auth:
             username: "{{ lookup('ansible.builtin.env', 'DOCKERHUB_USER') }}"
-            password: "{{ dockerhub_token }}"
+            password: "{{ registries_mirror_token }}"
   no_log: true
-  notify: Restart k3s
+  notify: Restart k3s for registries
+```
+
+```yaml
+# roles/node_exporter/vars/main.yml
+---
+node_exporter_release: "node_exporter-{{ node_exporter_version }}.linux-amd64"
+node_exporter_url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/{{ node_exporter_release }}.tar.gz"
+node_exporter_current: >-
+  {{ (node_exporter_installed.stdout | default('')) ~ (node_exporter_installed.stderr | default('')) }}
+```
+
+```yaml
+# roles/registries_mirror/handlers/main.yml
+---
+- name: Restart k3s for registries
+  ansible.builtin.service:
+    name: k3s
+    state: restarted
 ```
 
 ```yaml
 # roles/node_exporter/tasks/main.yml
-- name: Check node_exporter version
+---
+- name: Read the installed node_exporter version
   ansible.builtin.command: /usr/local/bin/node_exporter --version
-  register: ne
+  register: node_exporter_installed
   changed_when: false
   failed_when: false
 
-- name: Download node_exporter
+- name: Download and unpack the pinned release
   ansible.builtin.unarchive:
-    src: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+    src: "{{ node_exporter_url }}"
     dest: /tmp
     remote_src: true
-  when: node_exporter_version not in (ne.stdout | default('') + ne.stderr | default(''))
+  when: node_exporter_version not in node_exporter_current
 
-- name: Install binary
+- name: Install the binary
   ansible.builtin.copy:
-    src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+    src: "/tmp/{{ node_exporter_release }}/node_exporter"
     dest: /usr/local/bin/node_exporter
     mode: "0755"
     remote_src: true
-  when: node_exporter_version not in (ne.stdout | default('') + ne.stderr | default(''))
+  when: node_exporter_version not in node_exporter_current
   notify: Restart node_exporter
 
-- name: Systemd unit
+- name: Install the systemd unit (localhost only; the in-cluster Prometheus agent scrapes it)
   ansible.builtin.copy:
     dest: /etc/systemd/system/node_exporter.service
     mode: "0644"
@@ -341,13 +411,22 @@ node-label:
       [Unit]
       Description=Prometheus node exporter
       After=network-online.target
+
       [Service]
       DynamicUser=yes
       ExecStart=/usr/local/bin/node_exporter --web.listen-address=127.0.0.1:9100
       Restart=on-failure
+
       [Install]
       WantedBy=multi-user.target
   notify: Restart node_exporter
+
+- name: Enable and start node_exporter
+  ansible.builtin.systemd_service:
+    name: node_exporter
+    enabled: true
+    state: started
+    daemon_reload: true
 ```
 (Listens on localhost; the in-cluster Prometheus agent scrapes it via `hostNetwork` scrape config.)
 
@@ -815,6 +894,7 @@ The `evacuate.yml` GitHub workflow is gated by the `traffic-prod` environment's 
 
 ```yaml
 # roles/k3s_server/molecule/default/molecule.yml
+---
 driver:
   name: docker
 platforms:
@@ -826,43 +906,70 @@ provisioner:
   inventory:
     group_vars:
       all:
-        k3s_version: "v1.36.2+k3s1"
-        k3s_minor: "1.36"
         cb_cell: cb-test-dev
         cb_cloud: aws
         cb_origin_ip: 127.0.0.1
+        k3s_server_manage_service: false   # no systemd or k3s in the test container
 verifier:
   name: ansible
+scenario:
+  test_sequence:
+    - destroy
+    - syntax
+    - create
+    - converge
+    - idempotence
+    - verify
+    - destroy
 ```
 
 ```yaml
 # roles/k3s_server/molecule/default/converge.yml
-- name: Converge (config only — k3s cannot run inside an unprivileged container)
+---
+- name: Converge (configuration only; k3s can't run in an unprivileged container)
   hosts: all
+  gather_facts: false
   tasks:
-    - name: Render config
+    - name: Render the k3s configuration with the role's real tasks
       ansible.builtin.include_role:
         name: k3s_server
-        tasks_from: config_only
+        tasks_from: config.yml
 ```
 
 ```yaml
 # roles/k3s_server/molecule/default/verify.yml
+---
 - name: Verify
   hosts: all
+  gather_facts: false
   tasks:
-    - name: Read rendered config
+    - name: Read the rendered config
       ansible.builtin.slurp:
         src: /etc/rancher/k3s/config.yaml
-      register: cfg
+      register: k3s_server_config
 
-    - name: Assert traefik disabled and labels present
+    - name: Parse it
+      ansible.builtin.set_fact:
+        k3s_server_rendered: "{{ k3s_server_config.content | b64decode | from_yaml }}"
+
+    - name: Traefik disabled, cell labels and kubelet reservations present
       ansible.builtin.assert:
         that:
-          - "'traefik' in (cfg.content | b64decode)"
-          - "'cb-cell=cb-test-dev' in (cfg.content | b64decode)"
+          - "'traefik' in k3s_server_rendered.disable"
+          - "'cb-cell=cb-test-dev' in k3s_server_rendered['node-label']"
+          - "'cb-cloud=aws' in k3s_server_rendered['node-label']"
+          - "k3s_server_rendered['kubelet-arg'] | select('match', '^kube-reserved=') | list | length == 1"
+          - "k3s_server_rendered['write-kubeconfig-mode'] == '0600'"
 ```
-(`tasks/config_only.yml` contains the first two tasks of `main.yml`; `main.yml` imports it — so Molecule tests the same code the VMs run.)
+(`tasks/config.yml` is the configuration half of the role; `main.yml` imports it, so Molecule tests the same code the VMs run. The scenario sets `k3s_server_manage_service: false` because the test container has no systemd or k3s for the restart handler.)
+
+**What validating this layer found (Week 1, `bash tools/dev/iac-check.sh ansible molecule`):**
+- The production profile requires **role-prefixed variable names**, including registered results (`k3s_server_version`, `k3s_server_installed`, `node_exporter_current`); the earlier unprefixed names failed `var-naming[no-role-prefix]`.
+- Install k3s with the installer **pinned to the release tag** (`raw.githubusercontent.com/k3s-io/k3s/<version>/install.sh`), not the moving `get.k3s.io` script.
+- On WSL, `/mnt/<drive>` is world-writable, so Ansible **ignores `ansible.cfg` in the working directory** (and then can't find roles). Set `ANSIBLE_CONFIG` explicitly; Linux CI checkouts are unaffected.
+- Molecule's docker driver needs `rsync` and the `docker` CLI next to Ansible (`tools/dev/ansible-toolbox.Dockerfile`).
+- A config-only converge still runs the role's handlers, so a k3s restart handler needs an explicit off-switch for the container.
+- `aws_ssm` connections need an S3 transfer bucket; the AWS budget stack now creates it and `cloud_aws.yml` reads it from `CB_SSM_BUCKET`.
 
 ## 7. GitHub Actions wiring
 

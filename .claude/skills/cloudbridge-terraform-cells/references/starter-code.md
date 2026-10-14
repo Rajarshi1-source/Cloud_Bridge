@@ -352,10 +352,22 @@ mock_provider "aws" {
       id = "ami-0123456789abcdef0"
     }
   }
+  # The provider validates assume_role_policy as JSON even under mocks; a generated random string fails.
+  mock_data "aws_iam_policy_document" {
+    defaults = {
+      json = "{}"
+    }
+  }
+  # Attributes other resources validate as ARNs need ARN-shaped mock values.
+  mock_resource "aws_iam_role" {
+    defaults = {
+      arn = "arn:aws:iam::111122223333:role/cb-mock"
+    }
+  }
   mock_resource "aws_eks_cluster" {
     defaults = {
+      # Only computed attributes: vpc_config is a configured block, so its mock can't be overridden here.
       certificate_authority = [{ data = "Y2E=" }]
-      vpc_config            = [{ cluster_security_group_id = "sg-cluster", subnet_ids = [], security_group_ids = [], endpoint_private_access = true, endpoint_public_access = true, public_access_cidrs = [], vpc_id = "vpc-1" }]
     }
   }
   mock_resource "aws_db_instance" {
@@ -366,6 +378,12 @@ mock_provider "aws" {
 }
 
 mock_provider "google" {
+  # Cloud SQL validates private_network as a network self-link, so the mocked id must look like one.
+  mock_resource "google_compute_network" {
+    defaults = {
+      id = "projects/cb-test/global/networks/cb-gcp-test"
+    }
+  }
   mock_resource "google_container_cluster" {
     defaults = {
       master_auth = [{ cluster_ca_certificate = "Y2E=", client_certificate = "", client_key = "", client_certificate_config = [] }]
@@ -388,7 +406,8 @@ variables {
 }
 
 run "aws_managed_contract" {
-  command = apply
+  # plan, not apply: managed data services carry prevent_destroy, so a test apply could never tear down.
+  command = plan
   variables {
     cloud   = "aws"
     profile = "managed"
@@ -404,7 +423,8 @@ run "aws_managed_contract" {
 }
 
 run "gcp_managed_contract" {
-  command = apply
+  # plan, not apply: managed data services carry prevent_destroy, so a test apply could never tear down.
+  command = plan
   variables {
     cloud   = "gcp"
     profile = "managed"
@@ -817,7 +837,7 @@ resource "aws_eks_node_group" "default" {
 resource "aws_eks_addon" "vpc_cni" {
   cluster_name         = aws_eks_cluster.this.name
   addon_name           = "vpc-cni"
-  configuration_values = jsonencode({ enableNetworkPolicy = "true" })   # NetworkPolicy enforcement (leaky #5)
+  configuration_values = jsonencode({ enableNetworkPolicy = "true" }) # NetworkPolicy enforcement (leaky #5)
 }
 
 resource "aws_eks_addon" "pod_identity" {
@@ -1034,10 +1054,10 @@ output "cluster" {
   value = {
     name                = google_container_cluster.this.name
     endpoint            = "https://${google_container_cluster.this.endpoint}"
-    ca_certificate      = base64decode(google_container_cluster.this.master_auth[0].cluster_ca_certificate)
+    ca_certificate      = try(base64decode(google_container_cluster.this.master_auth[0].cluster_ca_certificate), null) # block is empty until GKE fills it
     k8s_version         = google_container_cluster.this.master_version
     origin              = google_compute_global_address.ingress.address # known up front (leaky #2)
-    node_security_group = null                                           # GCP uses firewall rules on the network
+    node_security_group = null                                          # GCP uses firewall rules on the network
     auth                = { kind = "gcp-gke", cluster_name = google_container_cluster.this.name, location = var.zone }
   }
 }
@@ -1105,6 +1125,60 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" # Ansible connects via SSM, no SSH
 }
 
+# Ansible's aws_ssm connection plugin moves files through S3, so the VM (and the CI role that runs
+# Ansible) need a transfer bucket. Short-lived objects only; never a place for state or secrets.
+resource "aws_s3_bucket" "ssm_transfer" {
+  bucket_prefix = "${var.name}-ssm-"
+  force_destroy = true
+  tags          = var.tags
+}
+
+resource "aws_s3_bucket_public_access_block" "ssm_transfer" {
+  bucket                  = aws_s3_bucket.ssm_transfer.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "ssm_transfer" {
+  bucket = aws_s3_bucket.ssm_transfer.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "ssm_transfer" {
+  bucket = aws_s3_bucket.ssm_transfer.id
+  rule {
+    id     = "expire-transfers"
+    status = "Enabled"
+    filter {}
+    expiration {
+      days = 1
+    }
+  }
+}
+
+data "aws_iam_policy_document" "ssm_transfer" {
+  statement {
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.ssm_transfer.arn}/*"]
+  }
+  statement {
+    actions   = ["s3:GetBucketLocation", "s3:ListBucket"]
+    resources = [aws_s3_bucket.ssm_transfer.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "ssm_transfer" {
+  name   = "ssm-transfer"
+  role   = aws_iam_role.vm.id
+  policy = data.aws_iam_policy_document.ssm_transfer.json
+}
+
 resource "aws_iam_instance_profile" "vm" {
   name = "${var.name}-vm"
   role = aws_iam_role.vm.name
@@ -1169,7 +1243,7 @@ output "cluster" {
     k8s_version         = var.k8s_version
     origin              = aws_eip.vm.public_ip
     node_security_group = aws_security_group.vm.id
-    auth                = { kind = "k3s-ssm", instance_id = aws_instance.vm.id }
+    auth                = { kind = "k3s-ssm", instance_id = aws_instance.vm.id, transfer_bucket = aws_s3_bucket.ssm_transfer.bucket }
   }
 }
 ```
@@ -1655,6 +1729,7 @@ provider "aws" {
   }
 }
 
+# Prefer the http-provider pattern in 7b; this provider needs Cloudflare configured in a cell stack.
 data "cloudflare_ip_ranges" "cf" {}
 
 module "cell" {
@@ -1725,6 +1800,140 @@ terraform {
   }
 }
 ```
+
+### 7b. Budget live stacks (implemented and validated in Week 1)
+
+`infra/live/{aws,gcp}-budget/10-foundation`. Two things the prod example above glosses over, both proven by an offline `terraform test` per stack (`tests/stack.tftest.hcl`: the stack's own cloud mocked, the other cloud's provider running for real with its placeholder config):
+
+1. **The other cloud's provider is still configured.** The facade wires both clouds' implementations (`count = 0` for the other one), so Terraform configures *both* providers in every stack. Give the unused one an explicit placeholder so it never looks for credentials the stack doesn't have:
+
+```hcl
+# infra/live/aws-budget/10-foundation/providers.tf
+provider "aws" {
+  region = var.region
+  default_tags {
+    tags = {
+      project = "cloudbridge"
+    }
+  }
+}
+
+# The cell facade wires the GCP implementations too (with count = 0 here), so Terraform still
+# configures the google provider in this stack. It never makes a call; a placeholder token stops
+# it from searching for credentials an AWS stack doesn't have. (Leaky abstraction: one facade,
+# two providers per stack.)
+provider "google" {
+  project      = "unused-in-an-aws-cell"
+  access_token = "unused-in-an-aws-cell"
+}
+```
+
+```hcl
+# infra/live/gcp-budget/10-foundation/providers.tf
+provider "google" {
+  project = var.gcp_project_id
+  region  = var.region
+}
+
+# The cell facade wires the AWS implementations too (with count = 0 here), so Terraform still
+# configures the aws provider in this stack. It never makes a call; these settings stop it from
+# validating credentials or calling STS/IMDS. (Leaky abstraction: one facade, two providers per stack.)
+provider "aws" {
+  region                      = "ap-south-1"
+  access_key                  = "unused-in-a-gcp-cell"
+  secret_key                  = "unused-in-a-gcp-cell"
+  skip_credentials_validation = true
+  skip_requesting_account_id  = true
+  skip_metadata_api_check     = true
+  skip_region_validation      = true
+}
+```
+
+2. **Cloudflare ranges without Cloudflare credentials.** `data "cloudflare_ip_ranges"` needs the Cloudflare provider configured in every cell stack. The ranges are published at a public URL, so read them with the `http` provider and refuse to build an origin firewall if the fetch fails:
+
+```hcl
+# infra/live/aws-budget/10-foundation/main.tf
+# Cloudflare publishes its origin ranges at a public URL; reading them needs no Cloudflare token,
+# so a cell stack never holds Cloudflare credentials. Origins accept 443 only from these ranges.
+data "http" "cloudflare_ipv4" {
+  url = "https://www.cloudflare.com/ips-v4"
+
+  lifecycle {
+    postcondition {
+      condition     = self.status_code == 200 && length(trimspace(self.response_body)) > 0
+      error_message = "Could not read Cloudflare's IPv4 ranges; refusing to build an origin firewall without them."
+    }
+  }
+}
+
+locals {
+  cloudflare_ipv4 = compact(split("\n", trimspace(data.http.cloudflare_ipv4.response_body)))
+}
+
+module "cell" {
+  source          = "../../../modules/cell"
+  cloud           = var.cloud
+  profile         = var.profile
+  env             = var.env
+  region          = var.region
+  shape           = var.shape
+  gcp_project_id  = var.gcp_project_id
+  cloudflare_ipv4 = local.cloudflare_ipv4
+}
+```
+
+```hcl
+# infra/live/aws-budget/10-foundation/tests/stack.tftest.hcl
+# Offline proof that this stack plans: AWS is mocked, the google provider runs with its real
+# placeholder configuration (it must not need credentials), and the Cloudflare ranges are overridden.
+mock_provider "aws" {
+  mock_data "aws_availability_zones" {
+    defaults = {
+      names = ["ap-south-1a", "ap-south-1b", "ap-south-1c"]
+    }
+  }
+  mock_data "aws_ami" {
+    defaults = {
+      id = "ami-0123456789abcdef0"
+    }
+  }
+  mock_data "aws_iam_policy_document" {
+    defaults = {
+      json = "{}"
+    }
+  }
+}
+
+override_data {
+  target = data.http.cloudflare_ipv4
+  values = {
+    status_code   = 200
+    response_body = "173.245.48.0/20\n103.21.244.0/22\n"
+  }
+}
+
+run "aws_budget_cell_plans_offline" {
+  command = plan
+
+  assert {
+    condition     = output.cell.cloud == "aws" && output.cell.profile == "budget"
+    error_message = "The AWS budget stack must build an AWS budget cell."
+  }
+
+  assert {
+    condition     = output.cell.shape.mem_gib == 2
+    error_message = "Budget cells use the 2 GiB shape pair."
+  }
+}
+```
+
+**Mock-provider lessons from making the contract test actually run** (it had only been format-checked before):
+- Mock only *computed* attributes. A default for a configured block (`vpc_config` on `aws_eks_cluster`) is rejected.
+- Values a provider validates still need a realistic shape under mocks: `aws_iam_policy_document.json = "{}"`, IAM role `arn`, and a network self-link for `google_compute_network.id` (Cloud SQL's `private_network` regex).
+- Resources with `prevent_destroy` (RDS, Cloud SQL, caches) can't be torn down by `terraform test`, so the managed-profile runs use `command = plan`; the budget runs `apply`.
+- Don't hard-index optional computed blocks in outputs (`master_auth[0]` is empty until GKE fills it); wrap them in `try()`.
+
+The AWS k3s module also creates the **SSM transfer bucket** Ansible's `aws_ssm` connection needs (`cluster.auth.transfer_bucket`); the reference had pointed at a bucket nothing created.
 
 ## 8. Budget-profile bootstrap
 

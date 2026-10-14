@@ -182,3 +182,9 @@ python3 evals/steering/backtest.py
 
 **2026-10-14 — layout**
 - Skills installed as `.claude/skills/<name>/` directories so Claude Code loads them; the flat `*.SKILL.md` copies and the initial (pre-verification) copies at the repo root were removed (recoverable from commit `f00975d`).
+
+**2026-10-15 — terraform-cells, ansible-ops, gitops-delivery (Week 1 infra validation)**
+- terraform-cells: the module code is now the validated repo files. The contract test had only been format-checked; making it run exposed mock defaults for configured blocks, values the provider validates (policy JSON, ARNs, network self-links), `prevent_destroy` blocking test teardown (managed runs now `plan`), and a hard `master_auth[0]` index. `terraform fmt` fixes; the SSM transfer bucket; a §7b section on budget stacks (placeholder config for the other cloud's provider; Cloudflare ranges via the `http` provider).
+- ansible-ops: role-prefixed variable names (production profile), the k3s installer pinned to the release tag, a `tasks/config.yml` split, a Molecule service switch, WSL's world-writable `ansible.cfg` trap, and the toolbox needing `rsync` plus the docker CLI.
+- gitops-delivery: `ci-app.yml` with real SHAs, attestations only on pushed images (PR `load: true` builds can't carry them), a fallback for an unset `DOCKERHUB_USER`, and least-privilege permissions.
+

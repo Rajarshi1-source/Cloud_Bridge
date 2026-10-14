@@ -1,0 +1,84 @@
+---
+- name: Disable SSH password and root login
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-cloudbridge.conf
+    mode: "0644"
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin no
+  notify: Restart ssh
+
+- name: Install baseline packages
+  ansible.builtin.apt:
+    name:
+      - unattended-upgrades
+      - auditd
+      - chrony
+      - curl
+      - jq
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable unattended security upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+- name: Kernel hardening sysctls
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-cloudbridge.conf
+    reload: true
+  loop:
+    - { name: net.ipv4.conf.all.rp_filter, value: "1" }
+    - { name: net.ipv4.conf.all.accept_redirects, value: "0" }
+    - { name: kernel.kptr_restrict, value: "2" }
+    - { name: vm.swappiness, value: "10" }
+
+- name: Create a 1 GiB swapfile (2 GiB VMs + JVM start-up bursts)
+  ansible.builtin.command: fallocate -l 1G /swapfile
+  args:
+    creates: /swapfile
+
+- name: Restrict swapfile permissions
+  ansible.builtin.file:
+    path: /swapfile
+    mode: "0600"
+
+- name: Format the swapfile
+  ansible.builtin.command: mkswap /swapfile
+  register: base_hardening_mkswap
+  changed_when: base_hardening_mkswap.rc == 0
+  when: ansible_facts['swaptotal_mb'] | int == 0
+
+- name: Persist swap in fstab
+  ansible.posix.mount:
+    src: /swapfile
+    path: none
+    fstype: swap
+    opts: sw
+    state: present
+
+- name: Activate swap
+  ansible.builtin.command: swapon -a
+  changed_when: false
+
+- name: Ensure journald drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Cap journald disk use
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/size.conf
+    mode: "0644"
+    content: |
+      [Journal]
+      SystemMaxUse=200M
+  notify: Restart journald

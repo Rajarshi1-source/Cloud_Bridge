@@ -1,0 +1,18 @@
+---
+# Hosts come from cloud tags Terraform set (cb-ansible-role = k3s_server), never from Terraform state.
+plugin: amazon.aws.aws_ec2
+regions:
+  - ap-south-1
+filters:
+  "tag:cb-ansible-role": k3s_server
+  instance-state-name: running
+hostnames:
+  - instance-id            # SSM targets instance IDs, not IPs
+keyed_groups:
+  - key: tags['cb-env']
+    prefix: env
+  - key: tags['cb-cloud']
+    prefix: cloud
+compose:
+  cb_cell: tags['cb-cell']
+  cb_origin_ip: public_ip_address

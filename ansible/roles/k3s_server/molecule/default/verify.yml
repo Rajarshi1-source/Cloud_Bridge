@@ -1,0 +1,22 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Read the rendered config
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/config.yaml
+      register: k3s_server_config
+
+    - name: Parse it
+      ansible.builtin.set_fact:
+        k3s_server_rendered: "{{ k3s_server_config.content | b64decode | from_yaml }}"
+
+    - name: Traefik disabled, cell labels and kubelet reservations present
+      ansible.builtin.assert:
+        that:
+          - "'traefik' in k3s_server_rendered.disable"
+          - "'cb-cell=cb-test-dev' in k3s_server_rendered['node-label']"
+          - "'cb-cloud=aws' in k3s_server_rendered['node-label']"
+          - "k3s_server_rendered['kubelet-arg'] | select('match', '^kube-reserved=') | list | length == 1"
+          - "k3s_server_rendered['write-kubeconfig-mode'] == '0600'"

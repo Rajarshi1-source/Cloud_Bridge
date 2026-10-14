@@ -1,0 +1,9 @@
+# Managed by Ansible (role k3s_server). k3s reads this before it starts.
+write-kubeconfig-mode: "0600"
+tls-san:
+  - "{{ cb_origin_ip }}"
+disable: {{ k3s_server_disable | to_json }}
+kubelet-arg: {{ k3s_server_kubelet_args | to_json }}
+node-label:
+  - "cb-cell={{ cb_cell }}"
+  - "cb-cloud={{ cb_cloud }}"

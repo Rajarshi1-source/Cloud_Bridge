@@ -291,7 +291,13 @@ The order follows Rev 2 §4.3 and ships first: **a public multi-cloud link by th
 >   - release compensation plus a fast-path confirm
 >   - gateway routes written in Java
 >   - Failsafe for `*IT` tests
-> - Still open: `ci-app.yml`, the Terraform budget cells and the Ansible roles below.
+>
+> **Status (15 Oct 2026): infra half done** on branch `week-1-infra`, all checked offline. Nothing here has touched a real cloud yet.
+> - **CI:** `ci-app.yml` builds, tests, scans, signs and publishes the services. `iac-checks.yml` runs the IaC checks on GitHub's runners. Every action is pinned to a commit SHA, and Dependabot keeps the pins current.
+> - **Terraform:** the full cell facade plus all implementations. Both budget stacks pass fmt, validate, a 6-run contract test, and an offline plan per stack. Provider lock files are committed.
+> - **Ansible:** the four VM roles and `site.yml` pass ansible-lint (production profile) and Molecule (converge, idempotence, verify).
+> - Run the checks locally with `bash tools/dev/iac-check.sh`. OpenTofu checks run in CI only: this machine can't reach GitHub's release-asset CDN, which OpenTofu downloads providers from.
+> - **Needs real accounts:** state buckets, `make budget-up`, `site.yml` against the live VMs, Docker Hub secrets for `ci-app.yml`, and the GCP OS Login and IAP roles for whoever runs Ansible (Week 5 CI identities).
 
 **Services** (`services/*`, Java 21 records, `JdbcClient`, `RestClient`, virtual threads):
 

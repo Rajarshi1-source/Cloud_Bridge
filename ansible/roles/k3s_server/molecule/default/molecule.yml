@@ -1,0 +1,27 @@
+---
+driver:
+  name: docker
+platforms:
+  - name: k3s-ubuntu
+    image: ubuntu:24.04
+    pre_build_image: false
+provisioner:
+  name: ansible
+  inventory:
+    group_vars:
+      all:
+        cb_cell: cb-test-dev
+        cb_cloud: aws
+        cb_origin_ip: 127.0.0.1
+        k3s_server_manage_service: false   # no systemd or k3s in the test container
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - destroy
+    - syntax
+    - create
+    - converge
+    - idempotence
+    - verify
+    - destroy

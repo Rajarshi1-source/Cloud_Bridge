@@ -1,0 +1,9 @@
+---
+- name: Converge (configuration only; k3s can't run in an unprivileged container)
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Render the k3s configuration with the role's real tasks
+      ansible.builtin.include_role:
+        name: k3s_server
+        tasks_from: config.yml

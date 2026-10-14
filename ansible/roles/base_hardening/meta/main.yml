@@ -1,0 +1,13 @@
+---
+galaxy_info:
+  role_name: base_hardening
+  namespace: cloudbridge
+  author: cloudbridge
+  description: OS hardening for the budget-profile k3s VMs
+  license: MIT
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []
