@@ -1702,7 +1702,9 @@ resource "google_memorystore_instance" "this" {
 
 output "cache" {
   value = {
-    host = google_memorystore_instance.this.endpoints[0].connections[0].psc_auto_connection[0].ip_address
+    # endpoints is empty until the PSC connection exists (OpenTofu plans it as a known empty list), and its
+    # nested path varies by provider version — read it from `terraform console` after the first apply.
+    host = try(google_memorystore_instance.this.endpoints[0].connections[0].psc_auto_connection[0].ip_address, null)
     port = 6379
     tls  = true
   }
@@ -1926,7 +1928,7 @@ run "aws_budget_cell_plans_offline" {
 - **OpenTofu is stricter than Terraform about mocks:** it validates every mock default against the full schema (a block can't take a list; all required nested fields must be present), where Terraform silently ignores a bad default. Keep mock defaults minimal and run the contract test on both engines — CI caught two defaults that only Terraform accepted.
 - Values a provider validates still need a realistic shape under mocks: `aws_iam_policy_document.json = "{}"`, IAM role `arn`, and a network self-link for `google_compute_network.id` (Cloud SQL's `private_network` regex).
 - Resources with `prevent_destroy` (RDS, Cloud SQL, caches) can't be torn down by `terraform test`, so the managed-profile runs use `command = plan`; the budget runs `apply`.
-- Don't hard-index optional computed blocks in outputs (`master_auth[0]` is empty until GKE fills it); wrap them in `try()`.
+- Don't hard-index computed collections in outputs (`master_auth[0]` until GKE fills it, Memorystore `endpoints[0]` until the PSC connection exists); wrap them in `try()`. OpenTofu plans some of these as *known empty* where Terraform leaves them unknown, so only the OpenTofu run exposes it.
 
 The AWS k3s module also creates the **SSM transfer bucket** Ansible's `aws_ssm` connection needs (`cluster.auth.transfer_bucket`); the reference had pointed at a bucket nothing created.
 

@@ -47,7 +47,9 @@ resource "google_memorystore_instance" "this" {
 
 output "cache" {
   value = {
-    host = google_memorystore_instance.this.endpoints[0].connections[0].psc_auto_connection[0].ip_address
+    # endpoints is empty until the PSC connection exists (OpenTofu plans it as a known empty list), and its
+    # nested path varies by provider version — read it from `terraform console` after the first apply.
+    host = try(google_memorystore_instance.this.endpoints[0].connections[0].psc_auto_connection[0].ip_address, null)
     port = 6379
     tls  = true
   }
