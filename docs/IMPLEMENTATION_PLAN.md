@@ -83,7 +83,7 @@ Initial versions came from commit `f00975d` (root). Final versions came from com
 
 ## 2. Phase 0 (completed 14 Oct 2026)
 
-> Status: all items below are done. The services build with `mvnw -DskipTests package`. The Testcontainers context-load tests have not run yet because Docker isn't installed on the dev machine (see §5).
+> Status: all items below are done. All three services build (`mvnw -DskipTests package`), and their context-load tests pass under Testcontainers on `postgres:18.4-alpine` / `valkey/valkey:9.0-alpine`, run with `tools/dev/test-services.sh` against the WSL2 Docker Engine (see §5).
 
 ### 0.1 Write `references/security-and-api.md` (cloudbridge-cell-services only, no new skill)
 
@@ -270,7 +270,7 @@ Write it to `docs/IMPLEMENTATION_PLAN.md`: §1 and §3–§6 of this file, plus 
 - A grep for `resilience4j-spring-boot3|Resilience4j 3|spring-boot-starter-web<|org.testcontainers.containers.PostgreSQLContainer` across `.claude/skills` returns nothing.
 - `.claude/skills/*/SKILL.md` has 9 entries, no flat `.SKILL.md` copies remain, and no `cloudbridge-*` files remain at the repo root.
 - A grep of Rev 2 finds no `hpa.bounds` and no `× fanout_factor`.
-- `services\<svc>\mvnw.cmd -q -DskipTests package` succeeds for all three (proves the pom edits resolve). With Docker running, `mvnw.cmd verify` passes the context-load tests on the pinned images.
+- `services\<svc>\mvnw.cmd -q -DskipTests package` succeeds for all three (proves the pom edits resolve). `tools/dev/test-services.sh` (WSL2 Docker) passes the context-load tests on the pinned images.
 - `git status` shows only the intended moves, deletions and edits. No commit until you ask.
 
 ---
@@ -434,7 +434,7 @@ The order follows Rev 2 §4.3 and ships first: **a public multi-cloud link by th
 
 ## 5. Prerequisites on Windows 11 (check before Week 1)
 
-- **Docker Desktop** for Testcontainers and Compose. It isn't on PATH in Git Bash right now.
+- **Docker:** no Docker Desktop on Windows; Docker Engine 29.x runs in the WSL2 distro `Ubuntu-D` (on the D: drive). Run tests with `MSYS_NO_PATHCONV=1 wsl -d Ubuntu-D -- bash "/mnt/d/New Projects/Cloud_Bridge/tools/dev/test-services.sh"`. It runs Maven in a throwaway `maven:3-eclipse-temurin-21` container that uses the WSL Docker socket (so WSL needs no Java), with `TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal`. Run Compose inside WSL too (`docker compose up` from `/mnt/d/...`).
 - **Terraform 1.15.x and OpenTofu 1.12.x.**
 - **Ansible:** ansible-core 2.21 doesn't support Windows as a control node, so use **WSL2 Ubuntu 24.04**, or run it only from GitHub Actions runners (which the plan already does for drills).
 - **Cloud accounts:** AWS with budgets at 50/80/100% and GCP with a billing budget, both from day 1. Cloudflare Load Balancing add-on (about US$5/month).
@@ -448,4 +448,4 @@ The order follows Rev 2 §4.3 and ships first: **a public multi-cloud link by th
 ## Verification (end to end, per phase)
 
 - **Phase 0:** see "Phase 0 verification" above.
-- **Each week:** that week's "Done when" checks, plus `mvnw verify` (with Docker), `terraform fmt -check` / `validate` / `test` on both engines, `ansible-lint` + Molecule, and the eval gates in `evals.yml` once they exist.
+- **Each week:** that week's "Done when" checks, plus `tools/dev/test-services.sh` (WSL2 Docker), `terraform fmt -check` / `validate` / `test` on both engines, `ansible-lint` + Molecule, and the eval gates in `evals.yml` once they exist.
