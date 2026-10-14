@@ -1,0 +1,7 @@
+# Test overrides (classpath:/config/ beats classpath:/ in Boot's property order).
+management:
+  server:
+    port: 0               # random, so several test contexts can coexist
+cloudbridge:
+  scheduling:
+    enabled: false        # tests drive the reaper / event consumer directly

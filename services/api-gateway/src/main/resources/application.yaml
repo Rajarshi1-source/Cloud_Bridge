@@ -1,3 +1,70 @@
 spring:
   application:
     name: api-gateway
+  threads:
+    virtual:
+      enabled: true
+  datasource:                          # only for /healthz/cell's SELECT 1 — use a read-only health user
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/cell}
+    username: ${SPRING_DATASOURCE_USERNAME:cell}
+    password: ${SPRING_DATASOURCE_PASSWORD:cell}
+    hikari:
+      maximum-pool-size: 2
+      connection-timeout: 1000
+      read-only: true
+      data-source-properties:
+        socketTimeout: 2
+  data:
+    redis:
+      url: ${VALKEY_URL:redis://localhost:6379}
+      timeout: 300ms
+  http:
+    clients:                           # upstream calls from the gateway routes
+      connect-timeout: 800ms
+      read-timeout: 2s
+  cloud:
+    circuitbreaker:
+      resilience4j:
+        disable-time-limiter: true     # the HTTP read timeout bounds calls; no extra 1 s limiter
+        disable-thread-pool: true      # run on the request's virtual thread
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: 8080
+  shutdown: graceful
+
+management:
+  server:
+    port: ${MANAGEMENT_PORT:9080}
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      cb_cell: ${CB_CELL:cb-local-dev}
+      service: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+
+cloudbridge:
+  cell: ${CB_CELL:cb-local-dev}
+  order-url: ${ORDER_URL:http://localhost:8081}
+  inventory-url: ${INVENTORY_URL:http://localhost:8082}
+  order-readiness-url: ${ORDER_READINESS_URL:http://localhost:9080/actuator/health/readiness}
+  health:
+    cache-ttl: 2s
+  cors:
+    allowed-origins: ${CB_CORS_ORIGINS:https://cp.example.invalid}
+  rate-limit:
+    get-per-minute: 120
+    order-post-per-minute: 30
+  shedding:
+    max-in-flight: 200

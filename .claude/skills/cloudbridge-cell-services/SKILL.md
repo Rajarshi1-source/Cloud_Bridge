@@ -45,7 +45,8 @@ The cache is **not** in `/healthz/cell`. A cold or failed Valkey degrades latenc
   1. **Claim** — insert `idempotency_keys(key, request_hash, status='PENDING')`. Conflict: `COMPLETED` → return the stored response; `PENDING` → 409 "in progress, retry"; same key + different body hash → 422.
   2. **Reserve** — `POST inventory/reservations` with `reservation_id = Idempotency-Key`. Inventory inserts the reservation and decrements its lease in one transaction; a repeat with the same id returns the original result.
   3. **Commit** — one transaction: insert order + items + outbox `order.created` (carrying `reservation_id`) and set the key `COMPLETED` with the response.
-  4. **Failure paths** — reserve fails → key `FAILED` (client may retry with the same key). Commit fails after reserve → the reservation stays `HELD` and inventory's reaper releases unconfirmed reservations after 15 min; `order.created` confirms them.
+  4. **Failure paths** — a line out of stock, or inventory timing out → `POST /reservations/{id}/release` (compensation, best effort) and key `FAILED`; the client may retry with the same key, and a released line is reserved afresh. Commit fails after reserve → key `FAILED`, the reservation stays `HELD` for the retry (reserve replays), and inventory's reaper releases it after 15 min if no retry comes.
+  5. **Confirm** — right after commit, `POST /reservations/{id}/confirm` (fast path); the `order.created` event is the durable path. Both are needed: if a HELD line outlives the reaper window while its order exists, the cell can sell that unit twice.
 - Each service owns its own schema in the cell database (`orders`, `inventory`); no service reads another's tables.
 - Outbox: `outbox` rows written in the same transaction as the state change; a relay polls with `FOR UPDATE SKIP LOCKED`, publishes to Valkey Stream `stream:cell-events` (`XADD … MAXLEN ~ 100000`), marks `published_at`. At-least-once — consumers dedupe on event id.
 
@@ -78,7 +79,7 @@ Trade-off to state plainly: **never oversells, may briefly undersell** (stock st
 |---|---|
 | Timeouts | gateway route 2 s; HTTP clients connect 800 ms / read 1.5 s; JDBC `socketTimeout=3`, Hikari `connectionTimeout=2000` |
 | Circuit breakers | gateway→order, gateway→inventory, order→inventory, services→Valkey: 50% failure over 20 calls, 30 s open, half-open 5 |
-| Retries | only GETs and `POST /orders` (idempotent by key); max 2, exponential backoff with full jitter |
+| Retries | gateway retries **GETs only** (max 2, exponential backoff). `POST /orders` is retried by the **client** under the same Idempotency-Key — the gateway's Retry filter needs body caching for POST, and with it the upstream received an **empty body** (caught by `UpstreamProxyIT` + the compose smoke test) |
 | Bulkheads | separate executors for DB-bound and cache-bound work; `@ConcurrencyLimit` on DB-heavy endpoints |
 | Load shedding | gateway rejects with 503 + `Retry-After: 2` when in-flight > limit; `/healthz/cell` stays green (shedding is graceful degradation, not failure) |
 | Cache failure | inventory reads fall back to Postgres (breaker open); rate limiter falls back to a local token bucket |
