@@ -20,7 +20,7 @@ for svc in ${SERVICES[*]}; do
     --add-host host.docker.internal:host-gateway \
     maven:3-eclipse-temurin-21 \
     bash -c 'cp -r /src /work && cd /work && mvn -B -q verify > /tmp/build.log 2>&1; rc=$?
-             cat target/surefire-reports/*.txt 2>/dev/null
+             cat target/surefire-reports/*.txt target/failsafe-reports/*.txt 2>/dev/null
              [ $rc -ne 0 ] && tail -60 /tmp/build.log
              exit $rc' || status=1
 done

@@ -130,24 +130,30 @@ CREATE TABLE inventory_lease (
     CONSTRAINT never_oversell CHECK (sold_qty <= granted_qty)
 );
 
+-- One row per (order, sku): reservation_id is the order's Idempotency-Key, so multi-line orders
+-- reserve each SKU under the same id and a replay of any line is recognised.
 CREATE TABLE reservations (
-    reservation_id uuid        PRIMARY KEY,                     -- = order Idempotency-Key
+    reservation_id uuid        NOT NULL,                        -- = order Idempotency-Key
     sku            text        NOT NULL REFERENCES products(sku),
     qty            int         NOT NULL CHECK (qty > 0),
     status         text        NOT NULL CHECK (status IN ('HELD', 'CONFIRMED', 'RELEASED')),
     created_at     timestamptz NOT NULL DEFAULT now(),
-    updated_at     timestamptz NOT NULL DEFAULT now()
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (reservation_id, sku)
 );
 CREATE INDEX reservations_held ON reservations (created_at) WHERE status = 'HELD';
 ```
-(Multi-SKU orders: one reservation row per SKU with a composite key `(reservation_id, sku)` — shown single-SKU for clarity; switch the PK when you add carts.)
+Orders carry up to 50 lines, so the composite key is the implemented layout (services/inventory-service V1).
 
 ### Queries (inventory-service)
 
 ```sql
--- I1. Idempotent reserve (one transaction). If the reservation already exists, return it unchanged.
+-- I1. Idempotent reserve (one transaction, per (reservation id, sku)).
+-- First clear a RELEASED line (compensated or reaped): otherwise a client retry under the same
+-- Idempotency-Key would "replay" a line that no longer holds stock.
+DELETE FROM inventory.reservations WHERE reservation_id = :rid AND sku = :sku AND status = 'RELEASED';
 WITH existing AS (
-  SELECT reservation_id, status FROM inventory.reservations WHERE reservation_id = :rid
+  SELECT reservation_id, status FROM inventory.reservations WHERE reservation_id = :rid AND sku = :sku
 ), dec AS (
   UPDATE inventory.inventory_lease
      SET sold_qty = sold_qty + :qty, updated_at = now()
@@ -165,12 +171,30 @@ SELECT reservation_id, status, 'created' AS outcome FROM ins
 UNION ALL
 SELECT reservation_id, status, 'replayed' FROM existing;
 -- 0 rows → out of stock in this cell (or lease expired) → 409
+-- Two concurrent first attempts with the same id: the second waits on the lease row lock, then hits
+-- the primary key; its whole transaction (decrement included) rolls back with DuplicateKeyException
+-- and the controller retries once, which now returns 'replayed'.
 
--- I2. Confirm on order.created (consumer of stream:cell-events; idempotent).
+-- I1b. Compensation (order-service saw a later line out of stock, or inventory timed out):
+-- give back every HELD line of the reservation. Idempotent.
+WITH rel AS (
+  UPDATE inventory.reservations SET status = 'RELEASED', updated_at = now()
+   WHERE reservation_id = :rid AND status = 'HELD'
+  RETURNING sku, qty
+)
+UPDATE inventory.inventory_lease l
+   SET sold_qty = l.sold_qty - rel.qty, updated_at = now()
+  FROM rel
+ WHERE l.sku = rel.sku;
+
+-- I2. Confirm: called directly by order-service right after its commit (fast path) AND by the
+--     order.created consumer of stream:cell-events (durable path). Idempotent.
 UPDATE inventory.reservations SET status = 'CONFIRMED', updated_at = now()
  WHERE reservation_id = :rid AND status = 'HELD';
 
 -- I3. Reaper: release HELD reservations older than 15 min and give the quantity back (one transaction).
+--     Residual risk (state it): if BOTH confirm paths fail for longer than the hold window, a committed
+--     order's line is released and the cell may sell that unit again. Alert on outbox lag.
 WITH expired AS (
   UPDATE inventory.reservations SET status = 'RELEASED', updated_at = now()
    WHERE status = 'HELD' AND created_at < now() - interval '15 minutes'

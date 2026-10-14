@@ -1,0 +1,92 @@
+# One cell on a laptop: gateway + order + inventory + Postgres 18 + Valkey 9.
+# Compose spec (no top-level `version:`). Run inside WSL:  docker compose up --build
+# Then:  curl -i http://localhost:8080/healthz/cell
+# Prometheus, Grafana, the control plane and k6 join this file in the weeks that build them.
+name: cloudbridge
+
+x-java: &java
+  restart: unless-stopped
+  healthcheck:
+    # Readiness on the management port; bash's /dev/tcp avoids needing curl in the JRE image.
+    test:
+      - CMD
+      - bash
+      - -c
+      - exec 3<>/dev/tcp/127.0.0.1/9080 && printf 'GET /actuator/health/readiness HTTP/1.0\r\n\r\n' >&3 && grep -q UP <&3
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 20s
+
+x-java-env: &java-env
+  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=70 -XX:+UseSerialGC -Xss512k"
+  SPRING_PROFILES_ACTIVE: local
+  CB_CELL: cb-local-dev
+  VALKEY_URL: redis://valkey:6379
+  SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/cell
+  SPRING_DATASOURCE_USERNAME: cell
+  SPRING_DATASOURCE_PASSWORD: cell
+
+services:
+  api-gateway:
+    <<: *java
+    build: ./services/api-gateway
+    ports: ["8080:8080"]
+    environment:
+      <<: *java-env
+      ORDER_URL: http://order-service:8081
+      INVENTORY_URL: http://inventory-service:8082
+      ORDER_READINESS_URL: http://order-service:9080/actuator/health/readiness
+      CB_CORS_ORIGINS: http://localhost:3000
+    depends_on:
+      order-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+
+  order-service:
+    <<: *java
+    build: ./services/order-service
+    environment:
+      <<: *java-env
+      INVENTORY_URL: http://inventory-service:8082
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+
+  inventory-service:
+    <<: *java
+    build: ./services/inventory-service
+    environment:
+      <<: *java-env                    # `local` profile seeds SKU-1 / SKU-2 with a long-lived lease
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18.4-alpine
+    environment:
+      POSTGRES_USER: cell
+      POSTGRES_PASSWORD: cell
+      POSTGRES_DB: cell
+    volumes:
+      - pg:/var/lib/postgresql          # PG18 images keep data under a version-specific subdirectory here
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cell"]
+      interval: 5s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:9.0-alpine
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pg: {}

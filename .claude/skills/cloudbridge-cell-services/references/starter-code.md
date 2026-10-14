@@ -2,6 +2,8 @@
 
 Package root `dev.cloudbridge`. Code uses Spring Framework 7 APIs (`JdbcClient`, `RestClient`, built-in `@ConcurrencyLimit` / `@Retryable` with `@EnableResilientMethods`), Jackson 3 (`tools.jackson.*`, Boot 4's default), Testcontainers 2.x and Resilience4j 2.4.0 (`resilience4j-spring-boot4`) for circuit breakers. Security for the admin lease API and the public API contract are in `security-and-api.md`.
 
+> **Implemented (Week 1):** the running versions of these classes live in `services/*` and differ in four deliberate ways — `reservations` has a composite key `(reservation_id, sku)` for multi-line orders (schema-and-queries I1/I1b); order-service compensates with `POST /reservations/{id}/release` when a later line is out of stock or inventory times out, and confirms right after commit with `POST /reservations/{id}/confirm` (the order.created event stays the durable path); the saga has a `DependencyUnavailable` outcome (503 + `Retry-After`); and `idempotency_keys.response_body` is jsonb, so a replay returns the same JSON, not necessarily the same bytes.
+
 ## Contents
 1. `pom.xml` (order-service; the others differ only in dependencies)
 2. `application.yml`
@@ -557,47 +559,42 @@ class CellHealthController {
 }
 ```
 
-```yaml
-# api-gateway application.yml (excerpt) — routes, timeouts, cell header, retries for idempotent calls only
-spring:
-  cloud:
-    gateway:
-      server:
-        webmvc:                       # verify the property prefix for the Spring Cloud release train you pin
-          routes:
-            - id: orders
-              uri: ${ORDER_URL}
-              predicates:
-                - Path=/orders/**
-              filters:
-                - AddResponseHeader=X-CB-Cell, ${CB_CELL}
-                - name: CircuitBreaker
-                  args:
-                    name: orders
-                    fallbackUri: forward:/fallback/unavailable
-                - name: Retry
-                  args:
-                    retries: 2
-                    methods: GET,POST           # POST /orders is safe only because it requires Idempotency-Key
-                    statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
-                    backoff:
-                      firstBackoff: 50ms
-                      maxBackoff: 400ms
-                      factor: 2
-            - id: inventory
-              uri: ${INVENTORY_URL}
-              predicates:
-                - Path=/inventory/**
-              filters:
-                - AddResponseHeader=X-CB-Cell, ${CB_CELL}
-                - name: Retry
-                  args:
-                    retries: 2
-                    methods: GET
+Routes are defined in Java with the WebMVC gateway's function DSL, so the compiler checks them (the YAML `filters:` shortcut arguments for Retry/CircuitBreaker are easy to get silently wrong). Verified against Spring Cloud 2025.1.3 (`spring-cloud-gateway-server-webmvc` 5.0.3):
+
+```java
+// dev/cloudbridge/gateway/GatewayRoutes.java (excerpt; full file in services/api-gateway)
+import static org.springframework.cloud.gateway.server.mvc.filter.BeforeFilterFunctions.uri;
+import static org.springframework.cloud.gateway.server.mvc.filter.CircuitBreakerFilterFunctions.circuitBreaker;
+import static org.springframework.cloud.gateway.server.mvc.filter.RetryFilterFunctions.retry;
+import static org.springframework.cloud.gateway.server.mvc.handler.GatewayRouterFunctions.route;
+import static org.springframework.cloud.gateway.server.mvc.handler.HandlerFunctions.http;
+import static org.springframework.web.servlet.function.RequestPredicates.GET;
+import static org.springframework.web.servlet.function.RequestPredicates.POST;
+
+@Bean
+RouterFunction<ServerResponse> orderRoutes(@Value("${cloudbridge.order-url}") String orderUrl) {
+    return route("orders")
+        .route(POST("/orders").or(GET("/orders")).or(GET("/orders/{id}")), http())
+        .before(uri(orderUrl))
+        .filter(circuitBreaker(c -> c.setId("orders").setFallbackUri("forward:/fallback/unavailable")
+            .setStatusCodes("500", "502", "503", "504")))            // 5xx counts as failure, not just exceptions
+        .filter(retry(c -> c.setRetries(2)
+            .setMethods(Set.of(HttpMethod.GET))                      // GETs only — see below
+            .setSeries(Set.of(HttpStatus.Series.SERVER_ERROR))
+            .setBackoff(Duration.ofMillis(50), Duration.ofMillis(400), 2)))
+        .build();
+}
 ```
-Reject `POST /orders` without `Idempotency-Key` at the gateway (400) so the retry filter can never duplicate an order. Load shedding: a servlet filter with a `Semaphore(maxInFlight)` that returns 503 + `Retry-After: 2` on `tryAcquire()` failure; exclude `/healthz/**` and `/actuator/**`.
+
+**Do not retry POST at the gateway.** Adding `POST` with `setCacheBody(true)` made the upstream receive an empty body (`bodyLength: 0`) on Spring Cloud 2025.1.3 — every order failed with 400 "Failed to read request". Tests against an unreachable upstream can't see this; keep a stub-upstream test (`UpstreamProxyIT`: a JDK `HttpServer` that echoes body length and `Idempotency-Key`) and the compose smoke test. Clients retry `POST /orders` with the same key.
+
+Gateway properties that matter: `spring.http.clients.connect-timeout: 800ms` / `read-timeout: 2s` (Boot 4 names; they bound upstream calls), `spring.cloud.circuitbreaker.resilience4j.disable-time-limiter: true` (otherwise Spring Cloud CircuitBreaker wraps every call in a **1 s** TimeLimiter that cuts off slower POSTs) and `disable-thread-pool: true` (run on the request's virtual thread). Breaker thresholds for the gateway come from a `Customizer<Resilience4JCircuitBreakerFactory>` bean, because the gateway uses Spring Cloud CircuitBreaker, not `resilience4j-spring-boot4` properties.
+
+`X-CB-Cell` is added by a servlet filter ordered before Spring Security (not an `AddResponseHeader` route filter), so it is also on 404s, 429s and 503s. Reject `POST /orders` without `Idempotency-Key` at the gateway (400), so every order POST that reaches order-service can be safely retried by its client. Load shedding: a servlet filter with a `Semaphore(maxInFlight)` that returns 503 + `Retry-After: 2` on `tryAcquire()` failure; exclude `/healthz/**` and `/actuator/**`. Filter code: `security-and-api.md` §6.5.
 
 ## 6. Tests
+
+Name Testcontainers tests `*IT` and declare `maven-failsafe-plugin` in each pom (Boot's parent binds its goals) — Surefire only runs `*Test`/`*Tests`, so without Failsafe the ITs are silently skipped. Disable `@Scheduled` jobs in tests (`cloudbridge.scheduling.enabled=false` in `src/test/resources/config/application.yaml`) and drive the relay/reaper/consumer directly.
 
 Shared Testcontainers wiring (Testcontainers 2.x, same shape Initializr generates), with the images pinned:
 

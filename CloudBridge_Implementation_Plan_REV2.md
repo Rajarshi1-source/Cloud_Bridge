@@ -3007,7 +3007,7 @@ The "one variable" now has two dimensions: `cloud` and `profile`. Same interface
 | Traffic | Stepped, gated, compensating shift | `evacuate.yml` saga (§15) | Cascading overload of the receiving cell |
 | Service | Timeouts everywhere | Gateway route timeout 2 s; HTTP clients 800 ms connect / 1.5 s read; JDBC `socketTimeout` 3 s | Thread exhaustion from slow dependencies |
 | Service | Circuit breaker | Resilience4j on gateway→order, gateway→inventory, services→Valkey | Retry storms against a failing dependency |
-| Service | Retry with jitter, idempotent only | GETs and `POST /orders` (has idempotency key); max 2 retries, exponential + full jitter | Transient errors without duplicate side effects |
+| Service | Retry with jitter, idempotent only | Gateway retries GETs only (max 2, exponential backoff); clients retry `POST /orders` under the same Idempotency-Key. *(Rev 2.1: a gateway POST retry needs body caching, which forwarded an empty body upstream — found by the Week 1 compose smoke test.)* | Transient errors without duplicate side effects |
 | Service | Bulkhead | Separate executors for DB and cache calls; virtual threads with `@ConcurrencyLimit` on DB-bound endpoints | One slow dependency starving everything |
 | Service | Load shedding | Gateway returns 503 + `Retry-After` when in-flight > limit; health stays green | Overload turns into graceful degradation, not crash loops |
 | Service | Graceful degradation | Cache down → DB reads; rate limiter fails open with local limits | Non-critical dependency outages |

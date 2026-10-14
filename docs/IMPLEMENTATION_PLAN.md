@@ -281,6 +281,18 @@ The order follows Rev 2 §4.3 and ships first: **a public multi-cloud link by th
 
 ### Week 1: App, local stack, first VMs (skills: cell-services, gitops-delivery, terraform-cells, ansible-ops)
 
+> **Status (14 Oct 2026): services + local stack done** on branch `week-1-services`.
+> - Built: the three services, Flyway V1 schemas, Dockerfiles and `docker-compose.yml`.
+> - Tests: 31 Testcontainers tests pass (gateway 11, order-service 9, inventory-service 11). Run them with `tools/dev/test-services.sh`.
+> - Local stack: `docker compose up --build` passes all 10 checks in `tools/dev/smoke-local.sh`, end to end through the gateway.
+> - The smoke test caught a real bug the tests missed: the gateway's POST retry forwarded an empty body. Fixed by retrying GETs only; `UpstreamProxyIT` now guards it.
+> - Deliberate deviations from the skill reference, all now in the skill:
+>   - a composite `reservations` key for multi-line orders
+>   - release compensation plus a fast-path confirm
+>   - gateway routes written in Java
+>   - Failsafe for `*IT` tests
+> - Still open: `ci-app.yml`, the Terraform budget cells and the Ansible roles below.
+
 **Services** (`services/*`, Java 21 records, `JdbcClient`, `RestClient`, virtual threads):
 
 - **order-service:**

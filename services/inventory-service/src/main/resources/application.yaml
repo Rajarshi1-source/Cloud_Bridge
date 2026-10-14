@@ -1,3 +1,66 @@
 spring:
   application:
     name: inventory-service
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/cell}
+    username: ${SPRING_DATASOURCE_USERNAME:cell}
+    password: ${SPRING_DATASOURCE_PASSWORD:cell}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      connection-timeout: 2000
+      data-source-properties:
+        socketTimeout: 3
+  flyway:
+    schemas: inventory
+    default-schema: inventory
+  data:
+    redis:
+      url: ${VALKEY_URL:redis://localhost:6379}
+      timeout: 300ms
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: 8082
+  shutdown: graceful
+
+management:
+  server:
+    port: ${MANAGEMENT_PORT:9080}
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db     # NOT redis: a cache failure must not unready the pod
+  metrics:
+    tags:
+      cb_cell: ${CB_CELL:cb-local-dev}
+      service: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+
+cloudbridge:
+  cell: ${CB_CELL:cb-local-dev}
+  reservations:
+    hold-minutes: 15
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      valkey:
+        sliding-window-size: 20
+        minimum-number-of-calls: 20
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 15s
+        permitted-number-of-calls-in-half-open-state: 5
