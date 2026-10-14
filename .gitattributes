@@ -1,0 +1,2 @@
+# Shell scripts run in WSL/Linux and CI: always LF
+*.sh text eol=lf
