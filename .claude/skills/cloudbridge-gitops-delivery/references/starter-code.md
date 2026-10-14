@@ -125,7 +125,7 @@ volumes:
 
 ```dockerfile
 # syntax=docker/dockerfile:1.7
-FROM eclipse-temurin:21-jdk AS build
+FROM eclipse-temurin:21-jdk-noble AS build
 WORKDIR /src
 COPY mvnw pom.xml ./
 COPY .mvn .mvn
@@ -134,7 +134,9 @@ COPY src src
 RUN --mount=type=cache,target=/root/.m2 ./mvnw -q -DskipTests package \
  && java -Djarmode=tools -jar target/*.jar extract --layers --launcher --destination /out
 
-FROM eclipse-temurin:21-jre
+# Pin the Ubuntu codename: the unpinned 21-jre tag moved to Ubuntu 26.04, which ships /usr/bin/pebble
+# (a Go binary with HIGH stdlib CVEs this image never runs) and failed the Trivy gate.
+FROM eclipse-temurin:21-jre-noble
 RUN useradd --uid 10001 --create-home app
 WORKDIR /app
 COPY --from=build /out/dependencies/ ./
