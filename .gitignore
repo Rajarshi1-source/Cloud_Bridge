@@ -1,0 +1,32 @@
+# Build output
+target/
+node_modules/
+.next/
+__pycache__/
+*.pyc
+.venv/
+
+# Terraform / OpenTofu — .terraform.lock.hcl IS committed
+.terraform/
+*.tfplan
+tfplan
+plan.json
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Ansible — kubeconfigs fetched from budget VMs
+ansible/.kube/
+.kube/
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db

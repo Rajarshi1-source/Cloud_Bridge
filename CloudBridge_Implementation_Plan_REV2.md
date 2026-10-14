@@ -10,6 +10,15 @@
 > **Tagline (Rev 2):** *One codebase. Two clouds. Zero blind spots.*
 > Rev 1 proved you can deploy to two clouds. Rev 2 proves the two clouds are **still identical**, that the smaller one can **actually absorb all traffic**, and which one is **cheaper per request** — with evidence, not adjectives.
 
+> **Rev 2.1 changelog (14 Oct 2026)** — aligns this document with the verified skill set in `.claude/skills/` (routing 57/57, output benchmark 112/112). This document stays the single source of truth; where code here and a skill's `references/` differ, the skill's reference code is the newer, eval-tested version.
+> - §B: added Resilience4j (`resilience4j-spring-boot4` 2.4.0 + `spring-boot-starter-aspectj`) and Spring Cloud 2025.1.3.
+> - §9.2: cell schema is split per owning service (`orders`, `inventory` schemas); order creation is a claim → reserve → commit saga (no DB transaction held across HTTP).
+> - §14.2: parity check `hpa.bounds` → `hpa.max` (max replicas must match; min may differ by profile).
+> - §15.2 and §29 Q8: capacity formula **divides** by fanout (it multiplied — wrong units); added the inverse HPA sizing rule.
+> - §16.2: recommender replaced with the backtest-verified version (2σ significance, pessimistic monotone latency fit, no extrapolation, safety-first, reversal hysteresis, smaller steps on thin data, 2% hysteresis).
+> - §19: the `allow-destructive` override is audited.
+> - §25: admin lease API row — the lease grant endpoint is authenticated with a Cloudflare Access JWT validated at the origin and bounded (see `cloudbridge-cell-services/references/security-and-api.md`).
+
 ---
 
 ## How to read this document
@@ -79,6 +88,8 @@ Rule used for every pin: **the version must be available on BOTH clouds' managed
 | PostgreSQL | **18** (18.4 minor) | RDS supports 18.4 (May 2026); Cloud SQL lists PostgreSQL 18 as default. PG18 adds built-in `uuidv7()` — used for cross-cell IDs (§9). |
 | Valkey (cache) | **9.0** | ElastiCache added Valkey 9.0 on 5 May 2026; Memorystore for Valkey supports 7.2/8.0/9.0 with 9.0 default. |
 | Spring Boot | **4.1.x** + Java 21 LTS | Spring Boot 4.0 OSS support ends 31 Dec 2026; 4.1.x is the current line. Your NaukriNearby stack is on 4.0.6 — for a project starting now, 4.0 would go EOL mid-demo season. Java 21 stays (your baseline; supported on Boot 4.x). |
+| Spring Cloud (gateway) | **2025.1.3** | Initializr's pairing for Boot 4.1.1; supports Boot 4.0.0 up to (not including) 4.2.0-M1. Gateway uses `spring-cloud-starter-gateway-server-webmvc` (servlet, virtual threads) and `spring-cloud-starter-circuitbreaker-resilience4j`. |
+| Resilience4j (order, inventory) | `resilience4j-spring-boot4` **2.4.0** + `spring-boot-starter-aspectj` | The Boot 4 integration; not in the Boot BOM yet, so pinned explicitly. `resilience4j-spring-boot3` is Boot 3 only and there is no Resilience4j 3.x. `spring-boot-starter-aspectj` is Boot 4's name for starter-aop and is needed by `@CircuitBreaker`. |
 | Next.js / Node | 16.3.x / Node 24 LTS | Same as your other capstones. |
 | Python (cost collector, parity checker, recommender) | 3.14 | Same as HealOps/TraceMap. |
 | Argo CD | 3.3.x | 3.3 requires Server-Side Apply for upgrades (ApplicationSet CRD size). |
@@ -1440,6 +1451,8 @@ CloudBridge has **two** databases with different jobs. Both are PostgreSQL 18 �
 
 ## 9.2 Cell DB schema (identical in every cell — enforced by Flyway migrations from one repo)
 
+> **Rev 2.1:** the schema below shows the tables in one place for readability. The implemented layout (cloudbridge-cell-services `references/schema-and-queries.md`) splits it per owning service — `orders` schema (orders, order_items, idempotency_keys with `PENDING/COMPLETED/FAILED` status and stored response, outbox) and `inventory` schema (products, inventory_lease, reservations) — each migrated by its own service's Flyway. `POST /orders` is a claim → reserve → commit saga so no DB transaction is held open across the call to inventory-service.
+
 ```sql
 -- services/order-service/src/main/resources/db/migration/V1__cell_schema.sql
 CREATE TABLE orders (
@@ -2297,9 +2310,9 @@ checks:
   - id: resources.requests
     source: k8s.deployments[cb-app].containers[*].resources
     weight: 2
-  - id: hpa.bounds
-    source: k8s.hpa[cb-app].{min,max}
-    weight: 3                # max must be equal: both cells must be able to take 100%
+  - id: hpa.max
+    source: k8s.hpa[cb-app].max
+    weight: 3                # max must be equal: both cells must be able to take 100%; min may differ by profile
   - id: networkpolicy.count
     source: k8s.networkpolicies[cb-app] | count
     weight: 2
@@ -2429,7 +2442,8 @@ Cloudflare (and k8gb) fail over on **health**. Neither knows whether the survivi
 ```
 peak_rps_total      = max over last 7 days of sum(cb:requests:rate5m{service="api-gateway"})
 per_pod_rps[svc]    = measured with k6 at p95 < 300 ms, error < 0.5%   (week-5 load test; stored in cells/<cell>/capacity.yaml)
-target_capacity_rps = min over services( hpa_max[svc] × per_pod_rps[svc] × fanout_factor[svc] )
+target_capacity_rps = min over services( hpa_max[svc] × per_pod_rps[svc] / fanout[svc] )
+                      (fanout[svc] = calls to svc per gateway request; capacity is in GATEWAY requests/s)
 node_capacity_ok    = sum(hpa_max × requests) ≤ node_max × allocatable
 
 capacity_ratio      = target_capacity_rps / peak_rps_total
@@ -2437,7 +2451,7 @@ proceed if capacity_ratio ≥ 1.2   (20% headroom)
 prewarm if capacity_ratio ≥ 1.2 only after raising mins; abort if node_capacity_ok is false
 ```
 
-`fanout_factor` matters: one gateway request may cause one order-service call and two inventory calls.
+`fanout` matters, and it **divides**: one gateway request may cause one order-service call and two inventory calls, so each inventory pod serves only half as many *gateway* requests. The inverse is the HPA sizing rule reviewed in chart PRs: `maxReplicas[svc] = ceil(1.2 × peak_gateway_rps_all_cells × fanout[svc] / per_pod_rps[svc])`. The formula lives only in the control-plane `GET /capacity/{cell}` API so the playbook, recommender and dashboard can't disagree.
 
 ## 15.3 Playbook
 
@@ -2644,18 +2658,24 @@ via least squares over the last 28 days (F = fixed, v = marginal cost per reques
 
 ```
 minimise   Σ_c v_c × w_c × R              (R = forecast total requests/day, Σ w_c = 1)
-subject to w_c ∈ {0} ∪ [0.10, 1]           (warm floor, same as Terraform validation)
-           w_c × R_peak ≤ capacity_c / 1.2  (headroom)
-           p95_c(w_c) ≤ 300 ms               (latency model from the last 28 days' load/latency curve)
-           |w_c − w_c,current| ≤ 0.20        (max step per week — no whiplash)
-           saving ≥ max(₹500/month, 5%)      (hysteresis — don't churn for noise)
+subject to safety first: if today's weight already violates a constraint, move to the nearest feasible weight
+           significance: act only if |v_aws − v_gcp| > 2σ  (σ from the regression's standard errors)
+           w_c ∈ {0} ∪ [0.10, 1]                        (warm floor, same as Terraform validation)
+           w_c × R_peak ≤ capacity_c / 1.2              (headroom)
+           p95_c(w_c) ≤ 300 ms                          (PESSIMISTIC fit: mean per distinct share, forced
+                                                         non-decreasing, 1.5× slope beyond observed data)
+           w_c ≤ highest observed share + 0.10          (no extrapolation far from data)
+           |w_c − w_c,current| ≤ 0.20 per week          (0.10 while the latency fit has < 3 distinct shares)
+           saving ≥ max(₹500/month, 2% of variable cost) (hysteresis; ×2 when reversing last week's direction)
+           billing data ≤ 72 h old, ≥ 21 days of history
 ```
 
 With two cells this is a one-dimensional search over `w_aws ∈ {0.10, 0.11, …, 0.90}` — no solver needed, which keeps it explainable.
 
 ```python
-# control-plane/steering/recommender.py
-from dataclasses import dataclass
+# control-plane/steering/recommender.py  (Rev 2.1 — backtest-verified; source: cloudbridge-finops-steering starter-code §6)
+from __future__ import annotations
+from dataclasses import dataclass, field
 from typing import Callable
 import numpy as np
 
@@ -2665,32 +2685,137 @@ class CellModel:
     fixed_inr_day: float
     marginal_inr_per_req: float
     capacity_rps: float
-    p95_at: Callable[[float], float]   # traffic share → predicted p95 ms (fitted piecewise-linear)
+    p95_at: Callable[[float], float]            # traffic share (0..1) → predicted p95 ms
+    marginal_se: float = 0.0                    # standard error of the marginal-cost estimate
+    observed_max_share: float = 1.0             # highest share this cell carried in the training window
+    distinct_shares: int = 1                    # how many different weights the latency fit has actually seen
 
-def fit_cost(days_requests: np.ndarray, days_cost: np.ndarray) -> tuple[float, float]:
-    A = np.vstack([np.ones_like(days_requests), days_requests]).T
-    (fixed, marginal), *_ = np.linalg.lstsq(A, days_cost, rcond=None)
-    return max(fixed, 0.0), max(marginal, 0.0)
+@dataclass
+class Recommendation:
+    w_aws: float
+    saving_inr_month: float
+    binding: str
+    reasons: list[str] = field(default_factory=list)
 
-def recommend(aws: CellModel, gcp: CellModel, total_req_day: float, peak_rps: float,
-              current_aws: float, floor=0.10, max_step=0.20, min_saving_inr_month=500.0):
-    def daily_variable_cost(w_aws: float) -> float:
-        return total_req_day * (w_aws * aws.marginal_inr_per_req + (1 - w_aws) * gcp.marginal_inr_per_req)
+def fit_cost(requests: np.ndarray, cost: np.ndarray) -> tuple[float, float, float]:
+    """daily_cost = F + v × requests. Returns (F, v, se_v); F and v clamped to ≥ 0.
+    se_v matters: day-to-day traffic variation is what identifies v — with flat traffic the
+    estimate is noise, and the recommender must not act on noise."""
+    x, y = requests.astype(float), cost.astype(float)
+    A = np.vstack([np.ones_like(x), x]).T
+    coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+    resid = y - A @ coef
+    dof = max(len(y) - 2, 1)
+    s2 = float(resid @ resid) / dof
+    cov = s2 * np.linalg.pinv(A.T @ A)
+    return max(float(coef[0]), 0.0), max(float(coef[1]), 0.0), float(np.sqrt(max(cov[1, 1], 0.0)))
 
-    best = current_aws
-    base = daily_variable_cost(current_aws)
-    for w in np.round(np.arange(floor, 1 - floor + 1e-9, 0.01), 2):
-        if abs(w - current_aws) > max_step: continue
-        if w * peak_rps > aws.capacity_rps / 1.2: continue
-        if (1 - w) * peak_rps > gcp.capacity_rps / 1.2: continue
-        if aws.p95_at(w) > 300 or gcp.p95_at(1 - w) > 300: continue
-        if daily_variable_cost(w) < daily_variable_cost(best):
-            best = float(w)
-    saving_month = (base - daily_variable_cost(best)) * 30
-    if saving_month < max(min_saving_inr_month, 0.05 * base * 30):
-        return current_aws, 0.0, ["saving below hysteresis threshold"]
-    return best, saving_month, [f"marginal ₹/1k req: aws={aws.marginal_inr_per_req*1000:.3f}, gcp={gcp.marginal_inr_per_req*1000:.3f}"]
+def fit_p95(shares: np.ndarray, p95: np.ndarray) -> Callable[[float], float]:
+    """Pessimistic latency model over traffic share.
+    - average p95 per distinct share (days at the same weight are repeats, not new points)
+    - force it non-decreasing (more load never makes latency better) — removes noise-driven negative slopes
+    - beyond the highest observed share, extrapolate with 1.5 × the last non-negative slope."""
+    uniq = np.unique(np.round(shares, 3))
+    xs = uniq
+    ys = np.maximum.accumulate(np.array([p95[np.isclose(np.round(shares, 3), u)].mean() for u in uniq]))
+    slope = max((ys[-1] - ys[-2]) / (xs[-1] - xs[-2]), 0.0) if len(xs) > 1 else 0.0
+    def f(s: float) -> float:
+        if s <= xs[-1]:
+            return float(np.interp(s, xs, ys))
+        return float(ys[-1] + 1.5 * slope * (s - xs[-1]))
+    return f
+
+def recommend(aws: CellModel, gcp: CellModel, total_req_day: float, peak_rps: float, current_aws: float,
+              floor: float = 0.10, max_step: float = 0.20, p95_slo_ms: float = 300.0, headroom: float = 1.2,
+              min_saving_inr_month: float = 500.0, min_saving_pct: float = 0.02,
+              max_extrapolation: float = 0.10, z: float = 2.0,
+              last_direction: int = 0, reversal_factor: float = 2.0) -> Recommendation:
+    """last_direction: +1 if the previous accepted change raised w_aws, -1 if it lowered it, 0 if none."""
+    # Big steps only once the latency fit covers >= 3 distinct shares per cell — big jumps on a thin fit cause whiplash.
+    if min(aws.distinct_shares, gcp.distinct_shares) < 3:
+        max_step = min(max_step, 0.10)
+    def var_cost(w: float) -> float:
+        return total_req_day * (w * aws.marginal_inr_per_req + (1 - w) * gcp.marginal_inr_per_req)
+
+    def violation(w: float) -> str | None:
+        if w < floor - 1e-9 or w > 1 - floor + 1e-9:
+            return "warm floor"
+        if abs(w - current_aws) > max_step + 1e-9:
+            return "max weekly step"
+        if w * peak_rps > aws.capacity_rps / headroom or (1 - w) * peak_rps > gcp.capacity_rps / headroom:
+            return "capacity headroom"
+        if w > aws.observed_max_share + max_extrapolation or (1 - w) > gcp.observed_max_share + max_extrapolation:
+            return "outside observed range"           # never trust the latency model far from data
+        if aws.p95_at(w) > p95_slo_ms or gcp.p95_at(1 - w) > p95_slo_ms:
+            return "latency SLO"
+        return None
+
+    grid = [float(w) for w in np.round(np.arange(floor, 1 - floor + 1e-9, 0.01), 2)]
+
+    # Safety first: if today's weight already breaks a constraint (e.g. latency observed above SLO),
+    # move to the nearest feasible weight regardless of cost, significance or hysteresis.
+    now_violation = violation(current_aws) if abs(current_aws - round(current_aws, 2)) < 1e-9 else None
+    if now_violation and now_violation != "max weekly step":
+        safe = [w for w in grid if violation(w) is None]
+        if not safe:
+            return Recommendation(current_aws, 0.0, "infeasible", ["no weight satisfies all constraints — investigate capacity"])
+        w_safe = min(safe, key=lambda w: abs(w - current_aws))
+        return Recommendation(w_safe, 0.0, f"safety: current weight violates {now_violation}", ["moved for safety, not cost"])
+
+    # Act only on a statistically meaningful cost difference — otherwise noise moves traffic.
+    diff = abs(aws.marginal_inr_per_req - gcp.marginal_inr_per_req)
+    se = float(np.hypot(aws.marginal_se, gcp.marginal_se))
+    if diff <= z * se:
+        return Recommendation(current_aws, 0.0, "not significant",
+                              [f"marginal-cost difference {diff * 1000:.4f} ₹/1k req is within {z}σ ({z * se * 1000:.4f})"])
+
+    base = var_cost(current_aws)
+    feasible = [w for w in grid if violation(w) is None]
+    if not feasible:
+        return Recommendation(current_aws, 0.0, "infeasible", ["no weight satisfies all constraints — investigate capacity"])
+    best = min(feasible, key=lambda w: (var_cost(w), abs(w - current_aws)))   # tie → smallest move
+
+    # The binding constraint is whatever stops one more step in the cheaper direction.
+    direction = 1 if aws.marginal_inr_per_req < gcp.marginal_inr_per_req else -1
+    binding = violation(round(best + 0.01 * direction, 2)) or "none (cost-optimal)"
+
+    saving = (base - var_cost(best)) * 30
+    reasons = [f"marginal ₹/1k req — aws {aws.marginal_inr_per_req * 1000:.4f}, gcp {gcp.marginal_inr_per_req * 1000:.4f}"]
+    threshold = max(min_saving_inr_month, min_saving_pct * base * 30)
+    direction_now = (best > current_aws) - (best < current_aws)
+    if last_direction and direction_now == -last_direction:
+        threshold *= reversal_factor                   # reversing last week's move must clear a higher bar
+        reasons.append(f"reversal of last week's direction — threshold ×{reversal_factor}")
+    if saving < threshold:
+        return Recommendation(current_aws, 0.0, "hysteresis", reasons + ["saving below threshold — no change proposed"])
+    return Recommendation(best, saving, binding, reasons)
+
+def pr_body(rec: Recommendation, current: dict, backtest: dict, data_as_of: str) -> str:
+    proposed = {"aws": round(rec.w_aws * 100), "gcp": 100 - round(rec.w_aws * 100)}
+    return "\n".join([
+        f"**Proposed weights:** aws {current['aws']} → {proposed['aws']}, gcp {current['gcp']} → {proposed['gcp']}",
+        f"**Estimated saving (variable cost only):** ₹{rec.saving_inr_month:,.0f}/month",
+        f"**Binding constraint:** {rec.binding}",
+        f"**Backtest ({backtest['days']} days):** {backtest['slo_violations']} SLO violations; "
+        f"saving vs static 70/30: {backtest['saving_vs_static_pct']:.1f}%",
+        f"**Billing data as of:** {data_as_of}",
+        "", *[f"- {r}" for r in rec.reasons],
+        "", "Fixed costs (control planes, NAT) are unchanged by a weight shift and are excluded from the saving.",
+    ])
 ```
+
+```python
+# control-plane/steering/weekly.py — supplies last_direction; without it the reversal guard never fires
+def last_direction(conn) -> int:
+    """Direction of the last *recommender* change. Drills, evacuations and manual edits don't count."""
+    rows = conn.execute("""SELECT (weights->>'aws')::int FROM traffic_changes
+                            WHERE source = 'recommender' ORDER BY applied_at DESC LIMIT 2""").fetchall()
+    if len(rows) < 2:
+        return 0
+    return (rows[0][0] > rows[1][0]) - (rows[0][0] < rows[1][0])
+```
+
+Why the extra guards exist: the first backtest run of the naive version caught three real bugs — it moved traffic when costs were equal (noise), its latency model predicted *lower* latency at higher load (duplicate-share noise), and it held an already-unsafe split because the saving "wasn't significant". A later run caught week-to-week oscillation (70→50→70), fixed by reversal hysteresis and smaller steps on thin data; the backtest now has a no-oscillation scenario.
 
 ## 16.3 Output
 
@@ -2824,7 +2949,7 @@ def evaluate(plan: dict, stack: str, affected_stacks: set[str]) -> list[dict]:
     return out
 ```
 
-`block` needs a maintainer to add the `allow-destructive` label (which re-runs the gate) — the label itself is audited in `plan_risk_reports`.
+`block` needs a maintainer to add the `allow-destructive` label (which re-runs the gate). The override is **recorded**, not just permitted: the gate job POSTs `{pr_number, stack, plan_sha256, verdict: block, overridden: true, approver}` to `plan_risk_reports` and adds a PR comment naming who applied the label. An override nobody can audit is just a bypass.
 
 ## 19.2 Optional LLM explainer
 
@@ -2999,6 +3124,7 @@ Cookie affinity pins a session to its home cell for 23 h; `zero_downtime_failove
 | Secrets | ESO → Secrets Manager / Secret Manager; DB passwords generated by Terraform `random_password` and written straight to the secret store (marked `sensitive`); state buckets encrypted and access-restricted |
 | Origins | Accept 443 only from Cloudflare ranges; Cloudflare Origin CA certs; Full (strict) TLS |
 | Control plane | Cloudflare Access in front of dashboard, Grafana and the remote-write receiver |
+| Admin lease API | `POST /admin/leases/grant` decides how much a cell may sell, and the allocator reaches the AWS cell through Cloudflare (a NetworkPolicy can't tell it from public traffic; an IP allowlist only proves "from Cloudflare"). Per-cell admin hostname `admin-<cloud>.<domain>` behind a Cloudflare Access service-token policy; the `Cf-Access-Jwt-Assertion` JWT is validated at the gateway **and** in inventory-service (issuer, AUD, expiry, allowlisted service token); grants are bounded (epoch jump ≤ 1000, TTL ≤ 20 min, quantity cap), replay-safe and audited in `lease_grant_log`. Spec: cloudbridge-cell-services `references/security-and-api.md` |
 | Supply chain | Actions pinned by SHA (Dependabot updates), cosign keyless signatures, SBOM attestation, Trivy image + IaC scanning; post-MVP: Kyverno `verifyImages` in prod cells |
 | Workloads | Restricted Pod Security on `cb-app`, default-deny NetworkPolicy, read-only root FS, non-root |
 | VMs (budget) | No public SSH; SSM / IAP only; unattended security upgrades; auditd |
@@ -3162,7 +3288,7 @@ Pool-level `random_steering.pool_weights`, not origin weights — my first versi
 Cloudflare's monitor fails twice at 60 s intervals → AWS pool unhealthy after ~2–3 min → sticky sessions move to GCP. GCP's HPA and node autoscaler absorb the load; if it's an unplanned failover, users see some latency while it scales. New orders work; AWS users' history is unavailable until failback; inventory never oversells because AWS's lease expires. Planned version: my playbook pre-warms first and shifts in steps — my last drill's numbers are on the dashboard.
 
 **Q8. Can GCP actually handle 100%?**
-That's the question the drill answers. Capacity ratio = HPA max × measured per-pod RPS ÷ peak RPS, must be ≥ 1.2 before any planned shift; otherwise the playbook pre-warms or refuses.
+That's the question the drill answers. Capacity ratio = min over services(HPA max × measured per-pod RPS ÷ fanout) ÷ peak gateway RPS, must be ≥ 1.2 before any planned shift; otherwise the playbook pre-warms or refuses.
 
 **Q9. How is data kept consistent across clouds?**
 It isn't synchronously — by design. Cells own their data; users are pinned by cookie; IDs are `uuidv7()`; inventory uses escrow leases with fencing. Cross-cloud async replication is post-MVP for history availability during evacuation.

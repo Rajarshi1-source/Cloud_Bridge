@@ -3,7 +3,8 @@
 Nine skills, built to the same conventions as the KubeThrifty / HealOps / ChaosProof / TraceMap sets:
 - kebab-case names under 64 characters
 - descriptions under 1024 characters, with no angle brackets
-- each skill shipped as a `.skill` zip containing `skillname/SKILL.md`, plus a readable `.SKILL.md` copy
+- each skill lives as a directory `.claude/skills/<name>/` (`SKILL.md` + `references/`) — the **only editable source**, and the layout Claude Code loads
+- `<name>.skill` next to it is a build artifact, rebuilt with `python tools/skills/package_skill.py .claude/skills/<name>` (validates frontmatter, description length and every YAML/JSON/XML block first); never edit a `.skill` by hand
 
 Each description says what the skill owns **and** which sibling owns the neighbouring work ("Not for X"). With nine related skills, picking the wrong sibling is the main risk.
 
@@ -23,7 +24,7 @@ Each description says what the skill owns **and** which sibling owns the neighbo
 | `cloudbridge-iac-pipeline` | OIDC identities, saved-plan apply, gates, drift, on-demand demo environments with a TTL reaper, plan-risk gate with an audited override (§12.5–12.6, §19, §25) | `starter-code.md`: workflows, CI identity Terraform, stack detector, Conftest. `eval-harness.md`: plan-risk rules, labelled eval, gate |
 | `cloudbridge-parity-contract` | Cross-cloud parity contract, expiring exceptions, fact adapters (§14) | `starter-code.md`: contract, engine, adapters, CLI, workflow. `eval-harness.md`: fixture eval |
 | `cloudbridge-finops-steering` | FOCUS ledger, fairness rules, steering recommender, the whole control-plane schema (§9.3–9.4, §16, §17) | `schema-and-queries.md`. `starter-code.md`: collectors, writer, recommender, weekly job. `eval-harness.md`: backtest |
-| `cloudbridge-cell-services` | Spring Boot 4.1 services: idempotency saga, outbox, escrow leases, health, resilience (§9.2, §21, §23) | `schema-and-queries.md`: cell schemas and the exact SQL. `starter-code.md`: Java classes, config, tests |
+| `cloudbridge-cell-services` | Spring Boot 4.1 services: idempotency saga, outbox, escrow leases, health, resilience, admin lease API auth and the public API contract (§9.2, §21, §23, §25) | `schema-and-queries.md`: cell schemas and the exact SQL. `starter-code.md`: Java classes, config, tests. `security-and-api.md`: route list, Cloudflare Access JWT validation, grant bounds + audit, Idempotency-Key / ProblemDetail / rate-limit / CORS contract |
 | `cloudbridge-observability-dashboard` | Agent remote_write, SLOs/alerts, Grafana, control-plane API, Next.js dashboard (§13) | `starter-code.md`: Prometheus/Alertmanager/blackbox/Grafana configs, FastAPI, Next.js pages |
 
 ## 1. Static checks
@@ -170,3 +171,14 @@ python3 evals/steering/backtest.py
 - the final benchmark (`benchmark.json` / `benchmark.md`)
 - every graded answer
 - `review.html`, a standalone viewer that compares each answer side by side with the iteration-1 version
+
+## Changelog
+
+**2026-10-14 — cell-services**
+- Added `references/security-and-api.md`. Closes a real gap: `POST /admin/leases/grant` was guarded only by a code comment ("NetworkPolicy + service token"). The allocator reaches the AWS cell through Cloudflare, so a NetworkPolicy can't tell it from public traffic, and a forged grant could inflate stock or fence out the real allocator. Now: per-cell admin hostname, Cloudflare Access JWT validated at the gateway and again in inventory-service, grant bounds (epoch jump, TTL, quantity), replay-safe grants and an audit log.
+- Fixed Boot 4 mismatches: Resilience4j is `resilience4j-spring-boot4` **2.4.0** + `spring-boot-starter-aspectj` (was "Resilience4j 3.x" / `resilience4j-spring-boot3`); `spring-boot-starter-webmvc` (was `-web`); Testcontainers 2.x artifacts and imports; Jackson 3 (`tools.jackson`); Spring Cloud 2025.1.3 named for the gateway.
+- Lease renewal direction made consistent: the allocator polls `/admin/leases/report` and re-grants; the cell never calls out.
+- Description now mentions admin lease API auth (1011 chars).
+
+**2026-10-14 — layout**
+- Skills installed as `.claude/skills/<name>/` directories so Claude Code loads them; the flat `*.SKILL.md` copies and the initial (pre-verification) copies at the repo root were removed (recoverable from commit `f00975d`).
