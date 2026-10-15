@@ -62,7 +62,7 @@ toolbox() {
   docker build -q -t "$TOOLBOX_IMAGE" -f "$REPO/tools/dev/ansible-toolbox.Dockerfile" "$REPO/tools/dev" >/dev/null
   docker run --rm -v "$REPO":/work -v /var/run/docker.sock:/var/run/docker.sock \
     -e ANSIBLE_COLLECTIONS_PATH=/tmp/collections:/root/.ansible/collections     -e ANSIBLE_CONFIG=/work/ansible/ansible.cfg -e ANSIBLE_ROLES_PATH=/work/ansible/roles     -w /work/ansible "$TOOLBOX_IMAGE" \
-    bash -c "ansible-galaxy collection install -r requirements.yml -p /tmp/collections >/dev/null && $1"
+    bash -c "ansible-galaxy collection install --no-cache -r requirements.yml -p /tmp/collections >/dev/null && $1"
 }
 
 check_ansible() {
