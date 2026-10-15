@@ -21,6 +21,17 @@ mock_provider "aws" {
       account_id = "111122223333"
     }
   }
+  # OpenTofu generates mock values at plan time too, and EKS validates its role_arn as an ARN.
+  mock_resource "aws_iam_role" {
+    defaults = {
+      arn = "arn:aws:iam::111122223333:role/cb-mock"
+    }
+  }
+  mock_resource "aws_eks_cluster" {
+    defaults = {
+      certificate_authority = [{ data = "Y2E=" }]
+    }
+  }
 }
 
 variables {
