@@ -6,7 +6,9 @@ Cloudflare provider v5 resources are generated from Cloudflare's API schema. The
 
 Besides the load balancer, the stack owns the per-cell **admin hosts** and the **Cloudflare Access** pieces from cloudbridge-cell-services `security-and-api.md` §3: one proxied record per cell (`admin-<cloud>.<domain>`, A for an IP origin, CNAME for an ALB hostname), a service token for the lease allocator, a reusable `non_identity` policy that admits only that token, and one `self_hosted` application covering both admin hosts (one AUD for the services to validate). The domain is read from `gitops/global/values.yaml`, so Ingress hosts and DNS can't disagree.
 
-Lock file: where GitHub release downloads are blocked, `terraform providers lock` can't fetch the Cloudflare provider. The registry's download API still returns each package's SHA-256, which is a valid `zh:` lock hash.
+Lock file: the Cloudflare provider is a GitHub release asset. Where those downloads are blocked, `terraform providers lock` fails locally, and `zh:` hashes (zip SHA-256, from the registry download API) are **not enough**: an unpacked provider in `.terraform/providers` is verified against `h1:` only, so `validate` fails with "cached package ... does not match any of the checksums". Get the `h1:` hashes from a `terraform providers lock` run on a CI runner.
+
+Testing on OpenTofu: its mock provider gives every instance of a resource the same generated `id`, and overrides can't target one `for_each` instance, so the pool-id-keyed `pool_weights` map collides. `tests/stack.tofutest.hcl` (OpenTofu prefers it over the `.tftest.hcl`) targets everything except the load balancer; Terraform runs the full test.
 
 ```hcl
 # infra/live/global/30-traffic/versions.tf

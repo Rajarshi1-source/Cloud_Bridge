@@ -47,15 +47,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: TEMP print cloudflare provider lock hashes (removed in the next commit)
-        if: matrix.check == 'terraform'
-        run: |
-          mkdir -p "$RUNNER_TEMP/cfl"
-          printf 'terraform {\n  required_providers {\n    cloudflare = {\n      source  = "cloudflare/cloudflare"\n      version = "5.28.0"\n    }\n  }\n}\n' > "$RUNNER_TEMP/cfl/main.tf"
-          docker run --rm -v "$RUNNER_TEMP/cfl":/w -w /w hashicorp/terraform:1.15.9 providers lock \
-            -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64 -platform=windows_amd64
-          cat "$RUNNER_TEMP/cfl/.terraform.lock.hcl"
-
       - name: Run ${{ matrix.check }} checks
         env:
           CHECK: ${{ matrix.check }}
