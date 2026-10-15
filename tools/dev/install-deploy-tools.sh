@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs what `make budget-up` runs on the operator's machine (WSL Ubuntu 24.04/26.04), pinned and
 # integrity-checked (Terraform SHA256SUMS, AWS CLI + Session Manager plugin GPG signatures, signed apt repo):
-# terraform, AWS CLI v2 + Session Manager plugin, gcloud, make/jq, and ansible-core in a venv.
+# terraform, AWS CLI v2 + Session Manager plugin, gcloud + GKE auth plugin, kubectl, make/jq, and
+# ansible-core in a venv.
 # Everything else (lint, tests) already runs in containers via tools/dev/iac-check.sh.
 #   bash tools/dev/install-deploy-tools.sh
 # Then, in every shell that deploys:  source ~/.venvs/cloudbridge/bin/activate
@@ -11,6 +12,7 @@ TERRAFORM_VERSION=1.15.9
 ANSIBLE_CORE_VERSION=2.21.5
 AWS_CLI_VERSION=2.38.1
 SSM_PLUGIN_VERSION=1.2.896.0
+KUBECTL_VERSION=v1.36.5        # same minor as the cells (EKS, GKE, k3s)
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SUDO=$([ "$(id -u)" -eq 0 ] && echo "" || echo sudo)
 ARCH=$(dpkg --print-architecture)               # amd64 | arm64
@@ -67,6 +69,15 @@ if ! command -v gcloud >/dev/null; then
   $SUDO apt-get update -qq && $SUDO apt-get install -y -qq google-cloud-cli >/dev/null
 fi
 
+echo "== kubectl $KUBECTL_VERSION (dl.k8s.io, checksum-verified) + GKE auth plugin"
+if ! kubectl version --client 2>/dev/null | grep -q "$KUBECTL_VERSION"; then
+  base="https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$ARCH"
+  curl -fsSL -o "$tmp/kubectl" "$base/kubectl"
+  echo "$(curl -fsSL "$base/kubectl.sha256")  $tmp/kubectl" | sha256sum -c -
+  $SUDO install -m 0755 "$tmp/kubectl" /usr/local/bin/kubectl
+fi
+$SUDO apt-get install -y -qq google-cloud-cli-gke-gcloud-auth-plugin >/dev/null
+
 echo "== ansible-core $ANSIBLE_CORE_VERSION + cloud SDKs in ~/.venvs/cloudbridge"
 python3 -m venv ~/.venvs/cloudbridge
 ~/.venvs/cloudbridge/bin/pip install -q --upgrade pip
@@ -78,6 +89,8 @@ terraform version | head -1
 aws --version
 session-manager-plugin --version
 gcloud version 2>/dev/null | head -1
+kubectl version --client | head -1
+gke-gcloud-auth-plugin --version 2>/dev/null | head -1
 ~/.venvs/cloudbridge/bin/ansible --version | head -1
 make --version | head -1; jq --version
 echo "Done. In each deploy shell: source ~/.venvs/cloudbridge/bin/activate"

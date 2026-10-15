@@ -27,7 +27,8 @@ variable "k8s_version" {
 }
 
 variable "origin_cidrs" {
-  type = list(string)
+  type        = list(string)
+  description = "Cloudflare's ranges; never empty (enforced by the cell facade's guards)."
 }
 
 variable "labels" {

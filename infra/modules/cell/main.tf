@@ -1,12 +1,38 @@
 locals {
   name = "cb-${var.cloud}-${var.env}"
-  labels = {
+  labels = merge({
     "cb-cell"    = local.name
     "cb-cloud"   = var.cloud
     "cb-env"     = var.env
     "managed-by" = "terraform"
+    }, var.expires_at == null ? {} : {
+    "cb-expires-at" = var.expires_at # digits only: a valid AWS tag and GCP label value alike
+  })
+  managed      = var.profile == "managed"
+  managed_data = local.managed && var.managed_data
+}
+
+# Cross-variable rules, as preconditions so they hold on Terraform and OpenTofu alike and a test
+# can expect the failure (expect_failures = [terraform_data.guards]).
+resource "terraform_data" "guards" {
+  lifecycle {
+    precondition {
+      condition     = !local.managed || (length(var.admin_cidrs) > 0 && !contains(var.admin_cidrs, "0.0.0.0/0"))
+      error_message = "A managed cell's API endpoint needs admin_cidrs: at least one, and never 0.0.0.0/0."
+    }
+    precondition {
+      condition     = local.managed || length(var.cloudflare_ipv4) > 0
+      error_message = "A budget cell needs cloudflare_ipv4: its firewall admits 443 only from those ranges."
+    }
+    precondition {
+      condition     = var.expires_at == null || var.env != "prod"
+      error_message = "Prod cells never expire: cb-expires-at is for ephemeral cells only."
+    }
+    precondition {
+      condition     = !local.managed || var.expires_at == null || !var.managed_data
+      error_message = "An expiring cell can't own managed data services: they carry prevent_destroy, so the reaper could never destroy it. Set managed_data = false."
+    }
   }
-  managed = var.profile == "managed"
 }
 
 # ---------- network ----------
@@ -46,6 +72,7 @@ module "eks" {
   max           = var.node_max
   admin_cidrs   = var.admin_cidrs
   ci_role_arn   = var.ci_role_arn
+  admin_arns    = var.admin_principal_arns
   tags          = local.labels
 }
 
@@ -99,10 +126,32 @@ locals {
   ))
 }
 
-# ---------- data (managed profile only; budget runs them in-cluster) ----------
+# ---------- registry mirror (managed profile; budget VMs pull docker.io with a k3s registry token) ----------
+module "mirror_aws" {
+  source             = "../registry-mirror/aws-ecr-ptc"
+  count              = var.cloud == "aws" && local.managed && var.image_mirror ? 1 : 0
+  region             = var.region
+  credentials_secret = var.dockerhub_credentials_secret
+}
+
+module "mirror_gcp" {
+  source         = "../registry-mirror/gcp-ar-remote"
+  count          = var.cloud == "gcp" && local.managed && var.image_mirror ? 1 : 0
+  project_id     = var.gcp_project_id
+  region         = var.region
+  dockerhub_user = var.dockerhub_user
+  labels         = local.labels
+}
+
+locals {
+  # Prefix the charts put in front of "<user>/cb-<service>@sha256:…" (gitops imageRegistryMirror).
+  image_mirror = coalesce(one(concat(module.mirror_aws[*].prefix, module.mirror_gcp[*].prefix)), "docker.io")
+}
+
+# ---------- data (managed profile only; budget and ephemeral cells run them in-cluster) ----------
 module "db_aws" {
   source         = "../database/aws-rds"
-  count          = var.cloud == "aws" && local.managed ? 1 : 0
+  count          = var.cloud == "aws" && local.managed_data ? 1 : 0
   name           = local.name
   env            = var.env
   vpc_id         = local.net.network_id
@@ -114,7 +163,7 @@ module "db_aws" {
 
 module "db_gcp" {
   source           = "../database/gcp-cloudsql"
-  count            = var.cloud == "gcp" && local.managed ? 1 : 0
+  count            = var.cloud == "gcp" && local.managed_data ? 1 : 0
   name             = local.name
   env              = var.env
   project_id       = var.gcp_project_id
@@ -126,7 +175,7 @@ module "db_gcp" {
 
 module "cache_aws" {
   source         = "../cache/aws-elasticache"
-  count          = var.cloud == "aws" && local.managed && var.managed_cache ? 1 : 0
+  count          = var.cloud == "aws" && local.managed_data && var.managed_cache ? 1 : 0
   name           = local.name
   vpc_id         = local.net.network_id
   subnet_ids     = local.net.private_subnet_ids
@@ -137,7 +186,7 @@ module "cache_aws" {
 
 module "cache_gcp" {
   source         = "../cache/gcp-memorystore"
-  count          = var.cloud == "gcp" && local.managed && var.managed_cache ? 1 : 0
+  count          = var.cloud == "gcp" && local.managed_data && var.managed_cache ? 1 : 0
   name           = local.name
   project_id     = var.gcp_project_id
   region         = var.region
