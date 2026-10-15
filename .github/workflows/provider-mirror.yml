@@ -1,0 +1,41 @@
+# Packs the Cloudflare Terraform provider (a GitHub release asset) into an artifact, for operator
+# machines whose network can't reach release-assets.githubusercontent.com. Locally:
+#   bash tools/dev/use-provider-mirror.sh
+# then `make origin-tls` / `make traffic` install the provider from that mirror. Lock-file hashes are
+# still enforced, so a tampered package fails init.
+name: provider-mirror
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths: [".github/workflows/provider-mirror.yml"] # proves the mirror still builds when this file changes
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Mirror only cloudflare/cloudflare at the locked version
+        run: |
+          version=$(sed -n '/cloudflare\/cloudflare/,/^}/s/^ *version *= *"\(.*\)"/\1/p' \
+            infra/live/global/30-traffic/.terraform.lock.hcl)
+          echo "cloudflare/cloudflare $version"
+          mkdir -p "$RUNNER_TEMP/cfg" mirror
+          printf 'terraform {\n  required_providers {\n    cloudflare = {\n      source  = "cloudflare/cloudflare"\n      version = "%s"\n    }\n  }\n}\n' \
+            "$version" > "$RUNNER_TEMP/cfg/main.tf"
+          docker run --rm -v "$RUNNER_TEMP/cfg":/w -v "$PWD/mirror":/mirror -w /w hashicorp/terraform:1.15.9 \
+            providers mirror -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64 -platform=windows_amd64 /mirror
+          find mirror -type f | sort
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: terraform-provider-mirror
+          path: mirror/
+          retention-days: 30
