@@ -7,3 +7,5 @@ ansible_aws_ssm_bucket_name: "{{ lookup('ansible.builtin.env', 'CB_SSM_BUCKET') 
 ansible_become: true
 cb_cloud: aws
 cb_secret_backend: aws
+# AWS is the main ring: releases arrive after the GCP canary soak.
+cb_ring: ring-main

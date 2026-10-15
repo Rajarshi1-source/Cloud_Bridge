@@ -1,0 +1,130 @@
+{{- if .Values.budgetData.enabled }}
+{{- $pg := .Values.budgetData.postgres -}}
+{{- $vk := .Values.budgetData.valkey -}}
+# Budget profile: the cell's Postgres and Valkey run next to the apps (managed cells use RDS / Cloud
+# SQL and ElastiCache / Memorystore instead). The Secrets they read are written by Ansible on the VM.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels: { app: postgres, cb-cell: {{ .Values.cell }} }
+spec:
+  selector: { app: postgres }
+  ports: [{ name: postgres, port: 5432, targetPort: postgres }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels: { app: postgres, cb-cell: {{ .Values.cell }} }
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres, cb-cell: {{ .Values.cell }} }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70                 # the alpine image's postgres user
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: {{ $pg.image }}
+          ports: [{ name: postgres, containerPort: 5432 }]
+          env:
+            - { name: POSTGRES_DB, value: cell }
+            - { name: POSTGRES_USER, valueFrom: { secretKeyRef: { name: cell-db, key: username } } }
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: cell-db, key: password } } }
+          resources:
+            {{- toYaml $pg.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql }   # PG18: data in a versioned subdirectory
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            exec: { command: [sh, -c, 'pg_isready -U "$POSTGRES_USER" -d cell'] }
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: [sh, -c, 'pg_isready -U "$POSTGRES_USER" -d cell'] }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      volumes:
+        - { name: run, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]  # k3s local-path: the data lives on the VM's disk
+        resources:
+          requests: { storage: {{ $pg.storage }} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+  labels: { app: valkey, cb-cell: {{ .Values.cell }} }
+spec:
+  selector: { app: valkey }
+  ports: [{ name: valkey, port: 6379, targetPort: valkey }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+  labels: { app: valkey, cb-cell: {{ .Values.cell }} }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: valkey }
+  template:
+    metadata:
+      labels: { app: valkey, cb-cell: {{ .Values.cell }} }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999                # the image's valkey user
+        runAsGroup: 999
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: valkey
+          image: {{ $vk.image }}
+          # volatile-lru evicts only keys with a TTL (inv:* cache, rate-limit windows), never the
+          # stream:cell-events outbox stream, which has no TTL.
+          args:
+            - valkey-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - {{ $vk.maxmemory | quote }}
+            - --maxmemory-policy
+            - volatile-lru
+          ports: [{ name: valkey, containerPort: 6379 }]
+          resources:
+            {{- toYaml $vk.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            exec: { command: [valkey-cli, ping] }
+            periodSeconds: 5
+      volumes:
+        - { name: data, emptyDir: {} }
+{{- end }}

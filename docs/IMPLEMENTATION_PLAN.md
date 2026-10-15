@@ -349,6 +349,14 @@ The order follows Rev 2 §4.3 and ships first: **a public multi-cloud link by th
 
 ### Week 2: Live multi-cloud link (skills: cloudflare-traffic, ansible-ops, gitops-delivery)
 
+> **Status (15 Oct 2026): repo side done** on branch `week-2-gitops-traffic`, checked offline. Nothing has touched a real cloud or Cloudflare yet.
+> - **Gitops:** a `cb-service` library chart and three thin service charts, `platform-addons` (default-deny NetworkPolicies, Argo Rollouts and Traefik as pinned child Applications, budget Postgres/Valkey), the root ApplicationSet template, global + per-cell values, and ring files holding the digests `main` published on 15 Oct. `iac-check.sh gitops` renders every chart for both cells; kubeconform validates all 60 resources.
+> - **Release flow:** `ci-app.yml` opens a `ring-canary` release PR after each `main` build (`tools/bump_ring.py`).
+> - **Ansible:** `cell_secrets`, `origin_tls` and `argocd_autodeploy`, plus the `/healthz/cell` smoke test in `site.yml`. Lint-clean on the production profile; Molecule covers converge, idempotence and verify.
+> - **Terraform:** `global/20-origin-tls` (Origin CA certificate into both secret managers) and `global/30-traffic` (load balancer, monitor, pools, admin records, Cloudflare Access) with offline stack tests. This machine can't download the Cloudflare provider, so those two stacks validate only in CI.
+> - **Deviations from the plan text:** Argo CD 3.5 (current) instead of 3.3. Canary analysis is off until Week 5's in-cell Prometheus. Budget cells get resource overrides. The Origin CA certificate has its own stack, so the traffic stack stays Cloudflare-only.
+> - **Needs real accounts:** follow [the go-live runbook](runbooks/week-2-go-live.md) (Cloudflare zone and Load Balancing, state buckets, pull-token secrets, `make budget-up`).
+
 - **Traffic stack** `infra/live/global/30-traffic`:
   - monitor (`/healthz/cell`, 60 s, retries 2, `SAS`/`SEAS`)
   - two pools (`for_each`)

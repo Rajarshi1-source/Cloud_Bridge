@@ -1,0 +1,20 @@
+# Service defaults. Per-cloud values come only from gitops/cells/<cell>/values.yaml,
+# image digests only from gitops/releases/<ring>.yaml.
+service: order-service
+port: 8081
+managementPort: 9080
+replicas:
+  min: 2
+  max: 10             # TODO(Week 5): derive from k6 per-pod RPS (see the HPA comment)
+resources:
+  requests: { cpu: 300m, memory: 448Mi }
+  limits: { cpu: "1", memory: 640Mi }
+javaToolOptions: "-XX:+UseSerialGC -Xss512k"
+database: true
+cache: true
+env:
+  INVENTORY_URL: "http://inventory-service:8082"
+ingress:
+  enabled: false
+analysis:
+  enabled: false        # Week 5 turns this on with the in-cell Prometheus

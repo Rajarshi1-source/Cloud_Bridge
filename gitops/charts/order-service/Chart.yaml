@@ -1,0 +1,9 @@
+apiVersion: v2
+name: order-service
+description: "Orders: idempotent claim, reserve, commit saga and the outbox relay."
+type: application
+version: 0.1.0
+dependencies:
+  - name: cb-service
+    version: 0.1.0
+    repository: file://../cb-service

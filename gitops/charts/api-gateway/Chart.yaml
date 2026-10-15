@@ -1,0 +1,9 @@
+apiVersion: v2
+name: api-gateway
+description: "Edge of the cell: routes, rate limits, load shedding, /healthz/cell."
+type: application
+version: 0.1.0
+dependencies:
+  - name: cb-service
+    version: 0.1.0
+    repository: file://../cb-service

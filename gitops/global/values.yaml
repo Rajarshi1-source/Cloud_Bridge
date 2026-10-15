@@ -1,0 +1,3 @@
+# Values every cell shares. Terraform reads `domain` from this file too (global/30-traffic), so the
+# Cloudflare hostnames and the Ingress hosts can't disagree.
+domain: cloudbridge.example     # REPLACE with your Cloudflare zone before the first apply

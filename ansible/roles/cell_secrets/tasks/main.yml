@@ -1,0 +1,67 @@
+---
+# Budget cells keep Postgres on the VM's disk, so its password lives on the VM too: generated once,
+# never in Git, never seen by Argo CD. k3s applies the manifests it finds in its auto-deploy dir.
+- name: Create the CloudBridge state directory
+  ansible.builtin.file:
+    path: "{{ cell_secrets_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Generate the database password once (force false keeps an existing one)
+  ansible.builtin.copy:
+    dest: "{{ cell_secrets_dir }}/db-password"
+    content: "{{ lookup('ansible.builtin.password', '/dev/null', chars=['ascii_letters', 'digits'], length=32) }}"
+    mode: "0600"
+    force: false
+  no_log: true
+
+- name: Read the database password
+  ansible.builtin.slurp:
+    src: "{{ cell_secrets_dir }}/db-password"
+  register: cell_secrets_db_password
+  no_log: true
+
+- name: Create the k3s auto-deploy directory
+  ansible.builtin.file:
+    path: "{{ cb_k3s_manifests_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Namespace cb-app with the restricted Pod Security standard enforced
+  ansible.builtin.copy:
+    dest: "{{ cb_k3s_manifests_dir }}/00-cb-app-namespace.yaml"
+    mode: "0600"
+    content: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: cb-app
+        labels:
+          pod-security.kubernetes.io/enforce: restricted
+          pod-security.kubernetes.io/enforce-version: latest
+
+- name: Database and cache Secrets the services and the in-cluster data services read
+  ansible.builtin.copy:
+    dest: "{{ cb_k3s_manifests_dir }}/05-cell-secrets.yaml"
+    mode: "0600"
+    content: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cell-db
+        namespace: cb-app
+      type: Opaque
+      stringData:
+        username: {{ cell_secrets_db_user | to_json }}
+        password: {{ cell_secrets_db_password.content | b64decode | trim | to_json }}
+        jdbcUrl: {{ ('jdbc:postgresql://postgres.cb-app.svc:5432/' ~ cell_secrets_db_name) | to_json }}
+      ---
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cell-cache
+        namespace: cb-app
+      type: Opaque
+      stringData:
+        url: "redis://valkey.cb-app.svc:6379"
+  no_log: true

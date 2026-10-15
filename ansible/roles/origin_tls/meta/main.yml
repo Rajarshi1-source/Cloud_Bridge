@@ -1,0 +1,13 @@
+---
+galaxy_info:
+  role_name: origin_tls
+  namespace: cloudbridge
+  author: cloudbridge
+  description: Cloudflare Origin CA certificate as the origin-tls Secret (Full strict TLS)
+  license: MIT
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []

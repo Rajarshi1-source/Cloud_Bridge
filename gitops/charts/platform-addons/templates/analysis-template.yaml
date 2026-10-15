@@ -1,0 +1,33 @@
+{{- if .Values.analysis.enabled }}
+# Rollout step `analysis` uses clusterScope: true, so this must stay a ClusterAnalysisTemplate.
+apiVersion: argoproj.io/v1alpha1
+kind: ClusterAnalysisTemplate
+metadata:
+  name: cb-canary-health
+spec:
+  args:
+    - name: service
+    - name: cell
+  metrics:
+    - name: error-rate
+      interval: 1m
+      count: 5
+      failureLimit: 1
+      successCondition: result[0] < {{ .Values.analysis.maxErrorRate }}
+      provider:
+        prometheus:
+          address: {{ .Values.analysis.prometheusAddress }}
+          query: |
+            sum(rate(http_server_requests_seconds_count{service="{{ "{{" }}args.service{{ "}}" }}",cb_cell="{{ "{{" }}args.cell{{ "}}" }}",status=~"5.."}[2m]))
+            / sum(rate(http_server_requests_seconds_count{service="{{ "{{" }}args.service{{ "}}" }}",cb_cell="{{ "{{" }}args.cell{{ "}}" }}"}[2m]))
+    - name: p95
+      interval: 1m
+      count: 5
+      failureLimit: 1
+      successCondition: result[0] < {{ .Values.analysis.maxP95Seconds }}
+      provider:
+        prometheus:
+          address: {{ .Values.analysis.prometheusAddress }}
+          query: |
+            histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{service="{{ "{{" }}args.service{{ "}}" }}",cb_cell="{{ "{{" }}args.cell{{ "}}" }}"}[2m])))
+{{- end }}

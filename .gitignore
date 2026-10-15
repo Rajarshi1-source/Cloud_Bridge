@@ -30,3 +30,6 @@ ansible/.kube/
 *.iml
 .DS_Store
 Thumbs.db
+
+# Helm: file:// dependencies are built by Argo CD and tools/dev/iac-check.sh, never committed
+gitops/charts/*/charts/

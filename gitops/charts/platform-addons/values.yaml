@@ -1,0 +1,49 @@
+# Defaults. Cells override only what gitops/cells/<cell>/values.yaml is allowed to differ in.
+cell: ""
+cloud: ""
+domain: ""
+
+# Child Applications (argo-rollouts, traefik) live in Argo CD's namespace and pull upstream charts.
+argocdNamespace: argocd
+
+addons:
+  argoRollouts:
+    chartVersion: 2.43.7        # Argo Rollouts v1.10.1
+  traefik:
+    chartVersion: 41.7.1        # Traefik v3.7.14; installed only where ingress.className is traefik
+
+ingress:
+  className: ""
+
+# Canary analysis queries an in-cell Prometheus, which arrives with observability in Week 5.
+analysis:
+  enabled: false
+  prometheusAddress: http://prometheus-query.monitoring:9090
+  maxErrorRate: "0.01"
+  maxP95Seconds: "0.3"
+
+network:
+  # Where ingress traffic to the gateway comes from: the controller's namespace (k3s Traefik) or
+  # load balancer CIDRs (managed cells set these in their cell values).
+  ingressNamespaces: []
+  ingressCidrs: []
+  # Managed data services (RDS / Cloud SQL / ElastiCache / Memorystore) live outside the cluster.
+  dataCidrs: []
+  monitoringNamespace: monitoring
+
+# Budget profile only: Postgres and Valkey run in the cluster. Credentials come from the cell-db /
+# cell-cache Secrets that Ansible writes on the VM; Argo CD never sees a password.
+budgetData:
+  enabled: false
+  postgres:
+    image: postgres:18.4-alpine
+    storage: 5Gi
+    resources:
+      requests: { cpu: 100m, memory: 160Mi }
+      limits: { memory: 256Mi }
+  valkey:
+    image: valkey/valkey:9.0-alpine
+    maxmemory: 48mb
+    resources:
+      requests: { cpu: 25m, memory: 48Mi }
+      limits: { memory: 96Mi }

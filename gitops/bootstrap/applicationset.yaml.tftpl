@@ -1,0 +1,61 @@
+# Root ApplicationSet: the only thing installed into a cell besides Argo CD itself.
+# One template, two renderers: Terraform templatefile() (managed cells, 20-bootstrap) and Ansible
+# with dollar-brace Jinja delimiters (budget cells, role argocd_autodeploy). Both fill only the
+# cell and ring placeholders; Argo CD's own {{.app}} passes through both untouched.
+# Never write a dollar-brace sequence in a comment here: both renderers would try to evaluate it.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: cloudbridge-apps
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - list:
+        elements:
+          - app: platform-addons
+          - app: api-gateway
+          - app: order-service
+          - app: inventory-service
+  template:
+    metadata:
+      name: "{{.app}}"
+      labels:
+        cb-cell: ${cell}
+    spec:
+      project: default
+      sources:
+        - repoURL: https://github.com/Rajarshi1-source/Cloud_Bridge.git
+          targetRevision: main
+          path: "gitops/charts/{{.app}}"
+          helm:
+            valueFiles:
+              - "$values/gitops/global/values.yaml"
+              - "$values/gitops/cells/${cell}/values.yaml"
+              - "$values/gitops/releases/${ring}.yaml"
+        - repoURL: https://github.com/Rajarshi1-source/Cloud_Bridge.git
+          targetRevision: main
+          ref: values
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: cb-app
+      # Pre-warm (ansible prewarm.yml) raises HPA minReplicas before an evacuation; without this,
+      # selfHeal would revert it within seconds.
+      ignoreDifferences:
+        - group: autoscaling
+          kind: HorizontalPodAutoscaler
+          jsonPointers:
+            - /spec/minReplicas
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+          - RespectIgnoreDifferences=true
+          - SkipDryRunOnMissingResource=true   # Rollout CRDs arrive with platform-addons
+        retry:
+          limit: 10
+          backoff: { duration: 15s, factor: 2, maxDuration: 5m }

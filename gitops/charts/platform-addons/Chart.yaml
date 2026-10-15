@@ -1,0 +1,8 @@
+apiVersion: v2
+name: platform-addons
+description: >-
+  Per-cell platform layer owned by Argo CD: NetworkPolicies for cb-app, the Argo Rollouts and
+  ingress-controller Applications, the canary AnalysisTemplate, and the budget profile's
+  in-cluster Postgres and Valkey.
+type: application
+version: 0.1.0

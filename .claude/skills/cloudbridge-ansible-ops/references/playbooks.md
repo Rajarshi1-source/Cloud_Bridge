@@ -3,7 +3,7 @@
 ## Contents
 1. requirements.yml, ansible.cfg
 2. Inventories + group_vars
-3. Roles: base_hardening, k3s_server, registries_mirror, node_exporter, origin_tls, argocd_autodeploy
+3. Roles: base_hardening, k3s_server, registries_mirror, node_exporter, cell_secrets, origin_tls, argocd_autodeploy
 4. Playbooks: site, prewarm, evacuate (+ shift_step), failback, drill, propose_evacuation
 5. Rulebook
 6. Molecule scenario
@@ -430,11 +430,149 @@ node_exporter_current: >-
 ```
 (Listens on localhost; the in-cluster Prometheus agent scrapes it via `hostNetwork` scrape config.)
 
+The three file-only roles below write into the k3s auto-deploy directory (`cb_k3s_manifests_dir`); k3s applies whatever is there and the k3s API stays closed. One Molecule scenario (`roles/argocd_autodeploy/molecule/default`) converges all three and asserts the parsed manifests, including that the ApplicationSet kept Argo CD's own `{{.app}}` after Ansible rendered it with `${` delimiters.
+
 ```yaml
-# roles/argocd_autodeploy/tasks/main.yml
-- name: Argo CD HelmChart (k3s auto-applies this directory)
+# ansible/roles/cell_secrets/tasks/main.yml
+---
+# Budget cells keep Postgres on the VM's disk, so its password lives on the VM too: generated once,
+# never in Git, never seen by Argo CD. k3s applies the manifests it finds in its auto-deploy dir.
+- name: Create the CloudBridge state directory
+  ansible.builtin.file:
+    path: "{{ cell_secrets_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Generate the database password once (force false keeps an existing one)
   ansible.builtin.copy:
-    dest: /var/lib/rancher/k3s/server/manifests/10-argocd.yaml
+    dest: "{{ cell_secrets_dir }}/db-password"
+    content: "{{ lookup('ansible.builtin.password', '/dev/null', chars=['ascii_letters', 'digits'], length=32) }}"
+    mode: "0600"
+    force: false
+  no_log: true
+
+- name: Read the database password
+  ansible.builtin.slurp:
+    src: "{{ cell_secrets_dir }}/db-password"
+  register: cell_secrets_db_password
+  no_log: true
+
+- name: Create the k3s auto-deploy directory
+  ansible.builtin.file:
+    path: "{{ cb_k3s_manifests_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Namespace cb-app with the restricted Pod Security standard enforced
+  ansible.builtin.copy:
+    dest: "{{ cb_k3s_manifests_dir }}/00-cb-app-namespace.yaml"
+    mode: "0600"
+    content: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: cb-app
+        labels:
+          pod-security.kubernetes.io/enforce: restricted
+          pod-security.kubernetes.io/enforce-version: latest
+
+- name: Database and cache Secrets the services and the in-cluster data services read
+  ansible.builtin.copy:
+    dest: "{{ cb_k3s_manifests_dir }}/05-cell-secrets.yaml"
+    mode: "0600"
+    content: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cell-db
+        namespace: cb-app
+      type: Opaque
+      stringData:
+        username: {{ cell_secrets_db_user | to_json }}
+        password: {{ cell_secrets_db_password.content | b64decode | trim | to_json }}
+        jdbcUrl: {{ ('jdbc:postgresql://postgres.cb-app.svc:5432/' ~ cell_secrets_db_name) | to_json }}
+      ---
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cell-cache
+        namespace: cb-app
+      type: Opaque
+      stringData:
+        url: "redis://valkey.cb-app.svc:6379"
+  no_log: true
+```
+
+```yaml
+# ansible/roles/origin_tls/tasks/main.yml
+---
+# The Origin CA certificate and key are created by infra/live/global/20-origin-tls and stored in
+# each cloud's secret manager as JSON {"certificate": ..., "private_key": ...}. Each cell reads its
+# own cloud's copy. Tests pass origin_tls_pair directly.
+- name: Read the Origin CA certificate from this cloud's secret manager
+  ansible.builtin.set_fact:
+    origin_tls_pair: >-
+      {{ (lookup('amazon.aws.secretsmanager_secret', 'cb/origin-tls', region='ap-south-1')
+          if cb_secret_backend == 'aws' else
+          lookup('google.cloud.gcp_secret_manager', key='cb-origin-tls',
+                 project=lookup('ansible.builtin.env', 'GCP_PROJECT_ID'), auth_kind='application'))
+         | from_json }}
+  when: origin_tls_pair is not defined
+  no_log: true
+
+- name: The certificate and key look like PEM
+  ansible.builtin.assert:
+    that:
+      - origin_tls_pair.certificate is search('-----BEGIN CERTIFICATE-----')
+      - origin_tls_pair.private_key is search('PRIVATE KEY-----')
+    quiet: true
+  no_log: true
+
+- name: Create the k3s auto-deploy directory
+  ansible.builtin.file:
+    path: "{{ cb_k3s_manifests_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: TLS Secret for the gateway Ingress (Cloudflare connects with Full strict)
+  ansible.builtin.copy:
+    dest: "{{ cb_k3s_manifests_dir }}/06-origin-tls.yaml"
+    mode: "0600"
+    content: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: origin-tls
+        namespace: cb-app
+      type: kubernetes.io/tls
+      data:
+        tls.crt: {{ origin_tls_pair.certificate | b64encode }}
+        tls.key: {{ origin_tls_pair.private_key | b64encode }}
+  no_log: true
+```
+
+```yaml
+# ansible/roles/argocd_autodeploy/defaults/main.yml
+---
+argocd_autodeploy_chart_version: "10.10.5"     # Argo CD v3.5.5
+# The same file Terraform renders for managed cells (one template, two renderers).
+argocd_autodeploy_appset_template: "{{ playbook_dir }}/../../gitops/bootstrap/applicationset.yaml.tftpl"
+```
+
+```yaml
+# ansible/roles/argocd_autodeploy/tasks/main.yml
+---
+# The k3s API is never exposed: k3s applies whatever is in its auto-deploy directory. Ansible
+# installs Argo CD and the root ApplicationSet here and nothing else; Argo CD owns the rest.
+- name: Create the k3s auto-deploy directory
+  ansible.builtin.file:
+    path: "{{ cb_k3s_manifests_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Argo CD as a k3s HelmChart (pinned chart version)
+  ansible.builtin.copy:
+    dest: "{{ cb_k3s_manifests_dir }}/10-argocd.yaml"
     mode: "0600"
     content: |
       apiVersion: helm.cattle.io/v1
@@ -445,21 +583,46 @@ node_exporter_current: >-
       spec:
         repo: https://argoproj.github.io/argo-helm
         chart: argo-cd
-        version: "{{ argocd_chart_version }}"
+        version: {{ argocd_autodeploy_chart_version | to_json }}
         targetNamespace: argocd
         createNamespace: true
         valuesContent: |
+          # 2 GiB VM: no SSO (dex) or notifications yet; the UI is reached by port-forward over
+          # SSM / IAP, never exposed.
+          dex:
+            enabled: false
+          notifications:
+            enabled: false
           configs:
             params:
               server.insecure: true
           server:
             service:
               type: ClusterIP
+            resources:
+              requests: { cpu: 25m, memory: 64Mi }
+              limits: { memory: 192Mi }
+          controller:
+            resources:
+              requests: { cpu: 100m, memory: 192Mi }
+              limits: { memory: 384Mi }
+          repoServer:
+            resources:
+              requests: { cpu: 50m, memory: 96Mi }
+              limits: { memory: 256Mi }
+          applicationSet:
+            resources:
+              requests: { cpu: 25m, memory: 48Mi }
+              limits: { memory: 128Mi }
+          redis:
+            resources:
+              requests: { cpu: 25m, memory: 32Mi }
+              limits: { memory: 96Mi }
 
-- name: Root ApplicationSet (same template Terraform renders for managed cells)
+- name: Root ApplicationSet with this cell and its release ring filled in
   ansible.builtin.template:
-    src: "{{ playbook_dir }}/../../gitops/bootstrap/applicationset.yaml.tftpl"
-    dest: /var/lib/rancher/k3s/server/manifests/20-root-appset.yaml
+    src: "{{ argocd_autodeploy_appset_template }}"
+    dest: "{{ cb_k3s_manifests_dir }}/20-root-appset.yaml"
     mode: "0600"
     variable_start_string: "${"
     variable_end_string: "}"
@@ -467,12 +630,18 @@ node_exporter_current: >-
     cell: "{{ cb_cell }}"
     ring: "{{ cb_ring }}"
 ```
-Using `${` / `}` as Jinja delimiters lets Ansible fill the same `${cell}` / `${ring}` placeholders Terraform's `templatefile()` fills, while Argo's `{{.app}}` passes through untouched — one template, two renderers.
+
+Using `${` / `}` as Jinja delimiters lets Ansible fill the same placeholders Terraform's `templatefile()` fills, while Argo's `{{.app}}` passes through untouched: one template, two renderers.
 
 ## 4. Playbooks
 
 ```yaml
-# playbooks/site.yml
+# ansible/playbooks/site.yml
+---
+# Configures the budget-profile VMs Terraform tagged cb-ansible-role = k3s_server, on both clouds,
+# then checks each origin answers /healthz/cell through its own ingress (bypassing Cloudflare).
+# Environment: CB_HOSTNAME (app.<domain>), DOCKERHUB_USER, CB_SSM_BUCKET (AWS), GCP_PROJECT_ID and
+# GCP_OSLOGIN_USER (GCP), plus cloud credentials for the inventories and secret lookups.
 - name: Configure budget-profile k3s cells
   hosts: all
   gather_facts: true
@@ -481,13 +650,15 @@ Using `${` / `}` as Jinja delimiters lets Ansible fill the same `${cell}` / `${r
     - k3s_server
     - registries_mirror
     - node_exporter
+    - cell_secrets
+    - origin_tls
     - argocd_autodeploy
 
 - name: Smoke test each origin locally (bypasses Cloudflare, checks the ingress path)
   hosts: all
   gather_facts: false
   tasks:
-    - name: Origin answers /healthz/cell
+    - name: Origin answers /healthz/cell (Argo CD needs a few minutes for the first sync)
       ansible.builtin.command:
         argv:
           - curl
@@ -497,10 +668,10 @@ Using `${` / `}` as Jinja delimiters lets Ansible fill the same `${cell}` / `${r
           - --resolve
           - "{{ lookup('ansible.builtin.env', 'CB_HOSTNAME') }}:443:127.0.0.1"
           - "https://{{ lookup('ansible.builtin.env', 'CB_HOSTNAME') }}/healthz/cell"
-      register: h
-      retries: 20
+      register: site_health
+      retries: 40
       delay: 15
-      until: h.rc == 0
+      until: site_health.rc == 0
       changed_when: false
 ```
 
