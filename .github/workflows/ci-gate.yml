@@ -1,0 +1,48 @@
+# The single required status check for main.
+# app and iac-checks only run when their paths change, so requiring them directly would leave a
+# docs-only PR waiting forever. This gate runs on every PR, waits for every other workflow run on
+# the same head commit, and passes only if each one succeeded (or none were triggered).
+# After re-running a failed sibling, re-run this gate too: it doesn't watch for later attempts.
+name: ci-gate
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+
+concurrency:
+  group: ci-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Wait for the other workflows on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          SELF: ${{ github.run_id }}
+        run: |
+          # Workflow runs exist from the moment the event fires (before their jobs queue), so a
+          # short settle delay is enough to see every sibling.
+          sleep 15
+          while true; do
+            runs=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&event=pull_request&per_page=100" \
+              --jq "[.workflow_runs[] | select(.id != $SELF)
+                     | {name, status, conclusion, url: .html_url}]")
+            pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")
+            if [ "$pending" -eq 0 ]; then break; fi
+            echo "waiting on $pending run(s): $(jq -r '[.[] | select(.status != "completed") | .name] | join(", ")' <<<"$runs")"
+            sleep 20
+          done
+          jq -r '.[] | "\(.name): \(.conclusion)"' <<<"$runs"
+          failed=$(jq '[.[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")] | length' <<<"$runs")
+          if [ "$failed" -ne 0 ]; then
+            jq -r '.[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral") | "::error::\(.name) \(.conclusion): \(.url)"' <<<"$runs"
+            exit 1
+          fi
+          echo "All $(jq length <<<"$runs") sibling workflow run(s) passed."
