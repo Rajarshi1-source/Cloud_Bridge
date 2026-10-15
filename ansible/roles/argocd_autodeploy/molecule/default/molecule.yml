@@ -1,0 +1,33 @@
+---
+# Covers cell_secrets, origin_tls and argocd_autodeploy: all three only write files that k3s applies,
+# so the scenario asserts the rendered manifests rather than a running cluster.
+driver:
+  name: docker
+platforms:
+  - name: autodeploy-ubuntu
+    image: ubuntu:24.04
+    pre_build_image: false
+provisioner:
+  name: ansible
+  inventory:
+    group_vars:
+      all:
+        cb_cell: cb-gcp-test
+        cb_ring: ring-canary
+        cb_secret_backend: gcp
+        cb_k3s_manifests_dir: /var/lib/rancher/k3s/server/manifests
+        argocd_autodeploy_appset_template: "${MOLECULE_PROJECT_DIRECTORY}/../../../gitops/bootstrap/applicationset.yaml.tftpl"
+        origin_tls_pair:
+          certificate: "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n"
+          private_key: "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n"
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - destroy
+    - syntax
+    - create
+    - converge
+    - idempotence
+    - verify
+    - destroy

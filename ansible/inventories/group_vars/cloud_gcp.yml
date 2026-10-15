@@ -10,3 +10,5 @@ ansible_ssh_common_args: >-
 ansible_become: true
 cb_cloud: gcp
 cb_secret_backend: gcp
+# GCP is the canary ring: every release lands here first (30% of users, the smaller blast radius).
+cb_ring: ring-canary

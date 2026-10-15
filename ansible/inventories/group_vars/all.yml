@@ -3,3 +3,5 @@
 k3s_server_version: "v1.36.5+k3s1"
 k3s_server_minor: "1.36"
 node_exporter_version: "1.12.1"
+# k3s applies every manifest in this directory (and re-applies on change); the k3s API stays closed.
+cb_k3s_manifests_dir: /var/lib/rancher/k3s/server/manifests

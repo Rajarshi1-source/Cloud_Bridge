@@ -1,0 +1,152 @@
+{{- /*
+cb-app is default-deny in both directions; every flow below is named. Enforced by k3s's built-in
+policy controller, GKE Dataplane V2 and the EKS VPC CNI network policy agent alike.
+*/ -}}
+{{- $apps := list "api-gateway" "order-service" "inventory-service" -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+---
+# Public traffic reaches only the gateway, and only from the ingress controller / load balancer.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingress-to-gateway
+spec:
+  podSelector:
+    matchLabels: { app: api-gateway }
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{ port: 8080 }]
+      from:
+        {{- range .Values.network.ingressNamespaces }}
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ . }} }
+        {{- end }}
+        {{- range .Values.network.ingressCidrs }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+        {{- if and (empty .Values.network.ingressNamespaces) (empty .Values.network.ingressCidrs) }}
+        {{- fail "network.ingressNamespaces or network.ingressCidrs must be set by the cell" }}
+        {{- end }}
+---
+# Gateway → order (routes + readiness probe for /healthz/cell) and → inventory (GET /inventory).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-egress
+spec:
+  podSelector:
+    matchLabels: { app: api-gateway }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: order-service } } }]
+      ports: [{ port: 8081 }, { port: 9080 }]
+    - to: [{ podSelector: { matchLabels: { app: inventory-service } } }]
+      ports: [{ port: 8082 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: order-ingress
+spec:
+  podSelector:
+    matchLabels: { app: order-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app: api-gateway } } }]
+      ports: [{ port: 8081 }, { port: 9080 }]
+---
+# Order → inventory: POST /reservations is internal and never routed by the gateway.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: order-egress
+spec:
+  podSelector:
+    matchLabels: { app: order-service }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: inventory-service } } }]
+      ports: [{ port: 8082 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inventory-ingress
+spec:
+  podSelector:
+    matchLabels: { app: inventory-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: api-gateway } }
+        - podSelector: { matchLabels: { app: order-service } }
+      ports: [{ port: 8082 }]
+---
+# Apps → the cell's Postgres and Valkey (in-cluster on budget, CIDRs on managed).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: apps-to-data
+spec:
+  podSelector:
+    matchExpressions: [{ key: app, operator: In, values: {{ toJson $apps }} }]
+  policyTypes: [Egress]
+  egress:
+    {{- if .Values.budgetData.enabled }}
+    - to: [{ podSelector: { matchLabels: { app: postgres } } }]
+      ports: [{ port: 5432 }]
+    - to: [{ podSelector: { matchLabels: { app: valkey } } }]
+      ports: [{ port: 6379 }]
+    {{- end }}
+    {{- range .Values.network.dataCidrs }}
+    - to: [{ ipBlock: { cidr: {{ . }} } }]
+      ports: [{ port: 5432 }, { port: 6379 }]
+    {{- end }}
+{{- if .Values.budgetData.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: data-ingress
+spec:
+  podSelector:
+    matchExpressions: [{ key: app, operator: In, values: [postgres, valkey] }]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions: [{ key: app, operator: In, values: {{ toJson $apps }} }]
+{{- end }}
+---
+# Metrics on the management port, for the in-cell Prometheus agent only (Week 5).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: metrics-from-monitoring
+spec:
+  podSelector:
+    matchExpressions: [{ key: app, operator: In, values: {{ toJson $apps }} }]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Values.network.monitoringNamespace }} }
+      ports: [{ port: 9080 }]

@@ -1,0 +1,24 @@
+# Service defaults. Per-cloud values come only from gitops/cells/<cell>/values.yaml,
+# image digests only from gitops/releases/<ring>.yaml.
+service: api-gateway
+port: 8080
+managementPort: 9080
+replicas:
+  min: 2
+  max: 6             # TODO(Week 5): derive from k6 per-pod RPS (see the HPA comment)
+resources:
+  requests: { cpu: 200m, memory: 320Mi }
+  limits: { cpu: "1", memory: 512Mi }
+javaToolOptions: "-XX:+UseSerialGC -Xss512k"
+# database: /healthz/cell runs SELECT 1 (a read-only health_reader role arrives in Week 4).
+database: true
+cache: true
+env:
+  ORDER_URL: "http://order-service:8081"
+  INVENTORY_URL: "http://inventory-service:8082"
+  ORDER_READINESS_URL: "http://order-service:9080/actuator/health/readiness"
+  CB_CORS_ORIGINS: "https://cp.{{ .Values.domain }}"
+ingress:
+  enabled: true          # className + annotations come from the cell
+analysis:
+  enabled: false        # Week 5 turns this on with the in-cell Prometheus

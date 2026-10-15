@@ -18,8 +18,8 @@ Full files — compose, Dockerfile, chart templates, AnalysisTemplate, Applicati
 | Spring Boot / Java / build | 4.1.x (floating patch) / Java 21 / Maven wrapper |
 | Base images | `eclipse-temurin:21-jdk-noble` build → `eclipse-temurin:21-jre-noble` run. Pin the Ubuntu codename: the bare `21-jre` tag silently moved to 26.04 and brought a vulnerable `/usr/bin/pebble` that failed the Trivy gate. When Trivy flags a Boot-managed library (Tomcat, Jackson) before a Boot patch exists, override Boot's version property (`tomcat.version`, `jackson-bom.version`, `jackson-2-bom.version`) with a dated comment, and remove it once Boot catches up |
 | Postgres / Valkey (compose + budget in-cluster) | `postgres:18.4-alpine` / `valkey/valkey:9.0-alpine` |
-| Argo CD | 3.3.x — upgrades require Server-Side Apply (`ServerSideApply=true`) because the ApplicationSet CRD exceeds client-side annotation limits |
-| Argo Rollouts, Helm | Helm 4.2.x; Rollouts pinned in `platform-addons` chart — verify current on build day |
+| Argo CD | 3.5.x (chart `argo-cd` 10.10.5 = v3.5.5, 15 Oct 2026) — upgrades require Server-Side Apply (`ServerSideApply=true`) because the ApplicationSet CRD exceeds client-side annotation limits |
+| Argo Rollouts, Traefik, Helm | Rollouts chart 2.43.7 (v1.10.1) and Traefik chart 41.7.1 (v3.7.14), pinned as child Applications in `platform-addons`; Helm 4.2.x (`alpine/helm:4.2.4` in `iac-check.sh gitops`) |
 | Prometheus / Grafana images in compose | `v3.14.0` / `13.2.0`, never `:latest` |
 
 ## Repository shape
@@ -27,13 +27,18 @@ Full files — compose, Dockerfile, chart templates, AnalysisTemplate, Applicati
 ```
 gitops/bootstrap/applicationset.yaml.tftpl   one template, rendered per cell by Terraform templatefile()
                                              (managed) or Ansible with ${ } delimiters (budget)
-gitops/charts/{api-gateway,order-service,inventory-service,platform-addons}/
+gitops/charts/cb-service/                    library chart: Rollout, Service, HPA, PDB, Ingress for every service
+gitops/charts/{api-gateway,order-service,inventory-service}/   values + one include line each
+gitops/charts/platform-addons/               NetworkPolicies, Rollouts/Traefik Applications, budget Postgres+Valkey
+gitops/global/values.yaml                    shared values (domain; Terraform reads it too)
 gitops/cells/<cell>/values.yaml              the ONLY per-cloud app config (ingress class, mirror prefix, secret store)
 gitops/releases/ring-canary.yaml             image digests — GCP cell reads this
 gitops/releases/ring-main.yaml               image digests — AWS cell reads this
 ```
 
-Per-cell values may differ only in: `cell`, `cloud`, `ingress.className` + annotations (`alb` on EKS, `gce` on GKE, `traefik` on k3s), `imageRegistryMirror`, `secretStore`, and replica floors for the budget profile. Anything else that differs is parity drift (see cloudbridge-parity-contract).
+Per-cell values may differ only in: `cell`, `cloud`, `ingress.className` + annotations (`alb` on EKS, `gce` on GKE, `traefik` on k3s), `imageRegistryMirror`, `secretStore`, `network` sources, and for the budget profile the replica floors, `resourceOverrides` and `budgetData`. Anything else that differs is parity drift (see cloudbridge-parity-contract).
+
+Check every change offline with `bash tools/dev/iac-check.sh gitops`: `helm lint --strict` and `helm template` for every chart × cell, then kubeconform (Argo CRD schemas from the datreeio catalog) over the output and both rendered root ApplicationSets.
 
 ## Images
 
@@ -48,7 +53,7 @@ The brief's "GitHub Actions → Docker Hub → EC2" path exists: the AWS budget 
 
 | Concern | Setting | Reason |
 |---|---|---|
-| Probes | `startupProbe` liveness path, 30 × 2 s; `livenessProbe` `/actuator/health/liveness`; `readinessProbe` `/actuator/health/readiness` | JVM start on small nodes takes 15–25 s; liveness must not kill a starting pod |
+| Probes | On the **management port 9080** (actuator never shares the routed port): `startupProbe` liveness path, 30 × 2 s; `livenessProbe` `/actuator/health/liveness`; `readinessProbe` `/actuator/health/readiness` | JVM start on small nodes takes 15–25 s; liveness must not kill a starting pod |
 | HPA | CPU 65% + request rate; `minReplicas` 2 managed / 1 budget; **`maxReplicas = ceil(1.2 × peak_gateway_rps_all_cells × fanout / per_pod_rps)`** so this cell can take 100% of traffic (show the arithmetic in the PR; if per-pod RPS isn't measured yet, say so and leave a TODO, don't invent it); always ship the `ignoreDifferences` entry for `/spec/minReplicas` in the ApplicationSet template, and show that YAML snippet whenever pre-warm or HPA is discussed — never just assert it exists | Evacuation capacity is reviewed like code; pre-warm overrides mins without Argo reverting them |
 | PDB | `minAvailable: 1` | GKE auto-upgrades and node drains can't take a service to zero |
 | Spread | zone `topologySpreadConstraints`, `ScheduleAnyway` | Zone loss inside a cell |

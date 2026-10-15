@@ -4,8 +4,8 @@
 1. docker-compose.yml
 2. Service Dockerfile
 3. Root ApplicationSet template
-4. Chart: values, Rollout, HPA, PDB, NetworkPolicy, AnalysisTemplate
-5. Per-cell values + ring files + capacity file
+4. Charts: the `cb-service` library, a service chart, platform-addons
+5. Global + per-cell values, ring files, capacity file
 6. `tools/bump_ring.py`
 7. `.github/workflows/ci-app.yml`
 8. `.github/workflows/ring-promote.yml`
@@ -149,10 +149,15 @@ ENTRYPOINT ["java", "-XX:MaxRAMPercentage=70", "-XX:+ExitOnOutOfMemoryError", "o
 
 ## 3. Root ApplicationSet template
 
+Validated (Week 2): `helm template` for every chart × cell, kubeconform with the Argo CRD schemas, and the `argocd_autodeploy` Molecule scenario renders this file with Ansible. **Never put a dollar-brace sequence in a comment in this file** — Terraform `templatefile()` and Ansible (with `${` as the Jinja delimiter) both try to evaluate it; the first draft did, and both renderers would have failed.
+
 ```yaml
 # gitops/bootstrap/applicationset.yaml.tftpl
-# Rendered by Terraform templatefile() (managed) or Ansible with ${ } delimiters (budget).
-# ${cell} and ${ring} are filled; Argo's {{.app}} passes through both renderers untouched.
+# Root ApplicationSet: the only thing installed into a cell besides Argo CD itself.
+# One template, two renderers: Terraform templatefile() (managed cells, 20-bootstrap) and Ansible
+# with dollar-brace Jinja delimiters (budget cells, role argocd_autodeploy). Both fill only the
+# cell and ring placeholders; Argo CD's own {{.app}} passes through both untouched.
+# Never write a dollar-brace sequence in a comment here: both renderers would try to evaluate it.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -171,22 +176,27 @@ spec:
   template:
     metadata:
       name: "{{.app}}"
+      labels:
+        cb-cell: ${cell}
     spec:
       project: default
       sources:
-        - repoURL: https://github.com/<you>/cloudbridge
+        - repoURL: https://github.com/Rajarshi1-source/Cloud_Bridge.git
           targetRevision: main
           path: "gitops/charts/{{.app}}"
           helm:
             valueFiles:
+              - "$values/gitops/global/values.yaml"
               - "$values/gitops/cells/${cell}/values.yaml"
               - "$values/gitops/releases/${ring}.yaml"
-        - repoURL: https://github.com/<you>/cloudbridge
+        - repoURL: https://github.com/Rajarshi1-source/Cloud_Bridge.git
           targetRevision: main
           ref: values
       destination:
         server: https://kubernetes.default.svc
         namespace: cb-app
+      # Pre-warm (ansible prewarm.yml) raises HPA minReplicas before an evacuation; without this,
+      # selfHeal would revert it within seconds.
       ignoreDifferences:
         - group: autoscaling
           kind: HorizontalPodAutoscaler
@@ -200,11 +210,16 @@ spec:
           - CreateNamespace=true
           - ServerSideApply=true
           - RespectIgnoreDifferences=true
+          - SkipDryRunOnMissingResource=true   # Rollout CRDs arrive with platform-addons
+        retry:
+          limit: 10
+          backoff: { duration: 15s, factor: 2, maxDuration: 5m }
 ```
-Terraform side (managed cells, `20-bootstrap`):
+
+Terraform side (managed cells, `20-bootstrap`, Week 3):
 ```hcl
 resource "kubernetes_manifest" "root_appset" {
-  manifest = yamldecode(templatefile("${path.module}/../../../gitops/bootstrap/applicationset.yaml.tftpl", {
+  manifest = yamldecode(templatefile("${path.module}/../../../../gitops/bootstrap/applicationset.yaml.tftpl", {
     cell = var.cell_name
     ring = var.cloud == "gcp" ? "ring-canary" : "ring-main"
   }))
@@ -212,110 +227,208 @@ resource "kubernetes_manifest" "root_appset" {
 }
 ```
 
-## 4. Chart (order-service shown; the other two differ in port, deps, resources)
+## 4. Charts
+
+The three services share one **library chart** (`gitops/charts/cb-service`, `type: library`); each service chart is a `Chart.yaml` with a `file://../cb-service` dependency, a `values.yaml`, and one template line `{{ include "cb-service.all" . }}`. One copy of the probes, security context and spread rules means the services can't drift apart. Argo CD builds `file://` dependencies itself; `charts/*/charts/` is git-ignored.
+
+Facts the first draft got wrong:
+- **Probes target the management port (9080)**, where actuator lives (`management.server.port`), not the service port.
+- **No `spec.replicas` on the Rollout**: the HPA owns the count.
+- **Analysis needs a query-capable Prometheus in the cell** (Week 5). Until then `analysis.enabled: false` and the canary pauses instead; an analysis step against a missing Prometheus aborts every rollout.
+- **Images must be digests**: the image helper `fail`s on a tag, so a bad ring file breaks rendering, not a deploy.
+- **Budget cells need resource overrides** (`resourceOverrides.<service>`): the default requests (~1.1 GiB) don't fit a 2 GiB VM next to k3s, Argo CD, Traefik, Rollouts, Postgres and Valkey.
+- Traefik, Argo Rollouts and the budget Postgres/Valkey are owned by Argo CD through `platform-addons` (child Applications pin the upstream chart versions). k3s's bundled Traefik is disabled.
+- Valkey uses `volatile-lru`: `allkeys-lru` could evict the `stream:cell-events` outbox stream (it has no TTL).
 
 ```yaml
-# gitops/charts/order-service/values.yaml
-service: order-service
-port: 8081
-replicas:
-  min: 2
-  max: 10          # sized for 100% of traffic in this cell — see capacity.yaml
-resources:
-  requests: { cpu: 300m, memory: 448Mi }
-  limits: { cpu: "1", memory: 640Mi }
-cell: ""            # from gitops/cells/<cell>/values.yaml
-cloud: ""
-imageRegistryMirror: ""
-secretStore: ""
-images: {}          # from gitops/releases/<ring>.yaml
-analysis:
-  maxErrorRate: "0.01"
-  maxP95Seconds: "0.3"
+# gitops/charts/cb-service/templates/_helpers.tpl
+{{/*
+Values contract (service chart values.yaml + gitops/global/values.yaml + gitops/cells/<cell>/values.yaml
++ gitops/releases/<ring>.yaml, merged in that order by Argo CD):
+  service, port, managementPort        from the service chart
+  replicas.{min,max}                   service chart; a budget cell may override (replica floors)
+  resources                            service chart; resourceOverrides.<service> wins (budget cells)
+  database / cache                     true = inject cell-db / cell-cache Secret env
+  env                                  extra plain env; values pass through tpl (may use .Values)
+  cell, cloud, imageRegistryMirror     from the cell
+  images.<service>                     from the ring file: <user>/cb-<service>@sha256:<digest>
+*/}}
+
+{{- define "cb-service.labels" -}}
+app: {{ .Values.service }}
+cb-cell: {{ required "cell is set by gitops/cells/<cell>/values.yaml" .Values.cell }}
+app.kubernetes.io/name: {{ .Values.service }}
+app.kubernetes.io/part-of: cloudbridge
+app.kubernetes.io/managed-by: argocd
+{{- end }}
+
+{{- define "cb-service.image" -}}
+{{- $ref := required (printf "images.%s is set by the ring file" .Values.service) (index (.Values.images | default dict) .Values.service) -}}
+{{- if not (regexMatch "@sha256:[0-9a-f]{64}$" $ref) -}}
+{{- fail (printf "images.%s must be pinned by digest, got %q" .Values.service $ref) -}}
+{{- end -}}
+{{- printf "%s/%s" (required "imageRegistryMirror is set by the cell" .Values.imageRegistryMirror) (trimPrefix "docker.io/" $ref) -}}
+{{- end }}
+
+{{- define "cb-service.resources" -}}
+{{- $override := index (.Values.resourceOverrides | default dict) .Values.service -}}
+{{- toYaml (default .Values.resources $override) -}}
+{{- end }}
 ```
 
 ```yaml
-# gitops/charts/order-service/templates/rollout.yaml
+# gitops/charts/cb-service/templates/_workload.tpl
+{{/* Everything one service needs. A service chart's only template is: {{ include "cb-service.all" . }} */}}
+{{- define "cb-service.all" -}}
+{{ include "cb-service.rollout" . }}
+---
+{{ include "cb-service.svc" . }}
+---
+{{ include "cb-service.hpa" . }}
+---
+{{ include "cb-service.pdb" . }}
+{{- if (.Values.ingress | default dict).enabled }}
+---
+{{ include "cb-service.ingress" . }}
+{{- end }}
+{{- end }}
+
+{{- define "cb-service.rollout" -}}
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
   name: {{ .Values.service }}
-  labels: { app: {{ .Values.service }}, cb-cell: {{ .Values.cell }} }
+  labels:
+    {{- include "cb-service.labels" . | nindent 4 }}
 spec:
+  # No spec.replicas: the HPA owns the count (and pre-warm owns HPA minReplicas, which the
+  # ApplicationSet tells Argo CD to ignore).
   revisionHistoryLimit: 3
   selector:
-    matchLabels: { app: {{ .Values.service }} }
+    matchLabels:
+      app: {{ .Values.service }}
   strategy:
     canary:
       steps:
         - setWeight: 10
+        {{- if .Values.analysis.enabled }}
         - analysis:
-            templates: [{ templateName: cb-canary-health }]
-            args: [{ name: service, value: {{ .Values.service }} }, { name: cell, value: {{ .Values.cell }} }]
+            templates:
+              - templateName: cb-canary-health
+                clusterScope: true
+            args:
+              - name: service
+                value: {{ .Values.service }}
+              - name: cell
+                value: {{ .Values.cell }}
+        {{- else }}
+        # Analysis needs the in-cell Prometheus (Week 5); until then the canary pauses instead.
+        - pause: { duration: 2m }
+        {{- end }}
         - setWeight: 50
         - pause: { duration: 5m }
         - setWeight: 100
   template:
     metadata:
-      labels: { app: {{ .Values.service }}, cb-cell: {{ .Values.cell }} }
+      labels:
+        {{- include "cb-service.labels" . | nindent 8 }}
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/path: /actuator/prometheus
-        prometheus.io/port: "{{ .Values.port }}"
+        prometheus.io/port: "{{ .Values.managementPort }}"
     spec:
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 40     # > Spring's graceful shutdown (30 s)
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
+        runAsGroup: 10001
         seccompProfile: { type: RuntimeDefault }
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: topology.kubernetes.io/zone
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
-            matchLabels: { app: {{ .Values.service }} }
+            matchLabels:
+              app: {{ .Values.service }}
       containers:
         - name: app
-          image: "{{ .Values.imageRegistryMirror }}/{{ index .Values.images .Values.service }}"
-          ports: [{ containerPort: {{ .Values.port }} }]
+          image: {{ include "cb-service.image" . | quote }}
+          ports:
+            - { name: http, containerPort: {{ .Values.port }} }
+            - { name: management, containerPort: {{ .Values.managementPort }} }
           env:
             - { name: CB_CELL, value: {{ .Values.cell | quote }} }
+            - { name: MANAGEMENT_PORT, value: {{ .Values.managementPort | quote }} }
+            - { name: JAVA_TOOL_OPTIONS, value: {{ .Values.javaToolOptions | quote }} }
+            {{- if .Values.database }}
             - { name: SPRING_DATASOURCE_URL, valueFrom: { secretKeyRef: { name: cell-db, key: jdbcUrl } } }
             - { name: SPRING_DATASOURCE_USERNAME, valueFrom: { secretKeyRef: { name: cell-db, key: username } } }
             - { name: SPRING_DATASOURCE_PASSWORD, valueFrom: { secretKeyRef: { name: cell-db, key: password } } }
+            {{- end }}
+            {{- if .Values.cache }}
             - { name: VALKEY_URL, valueFrom: { secretKeyRef: { name: cell-cache, key: url } } }
-          resources: {{- toYaml .Values.resources | nindent 12 }}
+            {{- end }}
+            {{- range $name, $value := .Values.env }}
+            - { name: {{ $name }}, value: {{ tpl (toString $value) $ | quote }} }
+            {{- end }}
+          resources:
+            {{- include "cb-service.resources" . | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
-          volumeMounts: [{ name: tmp, mountPath: /tmp }]
-          startupProbe:
-            httpGet: { path: /actuator/health/liveness, port: {{ .Values.port }} }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          # Probes hit the management port: actuator never shares the port the gateway routes to.
+          startupProbe:                     # JVM start on 2 GiB nodes: allow 60 s before liveness counts
+            httpGet: { path: /actuator/health/liveness, port: management }
             periodSeconds: 2
             failureThreshold: 30
           livenessProbe:
-            httpGet: { path: /actuator/health/liveness, port: {{ .Values.port }} }
+            httpGet: { path: /actuator/health/liveness, port: management }
             periodSeconds: 10
           readinessProbe:
-            httpGet: { path: /actuator/health/readiness, port: {{ .Values.port }} }
+            httpGet: { path: /actuator/health/readiness, port: management }
             periodSeconds: 5
-      volumes: [{ name: tmp, emptyDir: {} }]
-```
-`images` values hold `docker.io/<you>/cb-order-service@sha256:…`; the template prefixes the cell's mirror (on the mirror the path is `<mirror-prefix>/<you>/cb-order-service@sha256:…` — strip `docker.io/` in `bump_ring.py` so both forms work).
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 64Mi } }
+{{- end }}
 
-```yaml
-# gitops/charts/order-service/templates/hpa.yaml
+{{- define "cb-service.svc" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.service }}
+  labels:
+    {{- include "cb-service.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: {{ .Values.service }}
+  ports:
+    - { name: http, port: {{ .Values.port }}, targetPort: http }
+    - { name: management, port: {{ .Values.managementPort }}, targetPort: management }
+{{- end }}
+
+{{- define "cb-service.hpa" -}}
+{{- if gt (int .Values.replicas.min) (int .Values.replicas.max) }}
+{{- fail (printf "replicas.min (%v) > replicas.max (%v)" .Values.replicas.min .Values.replicas.max) }}
+{{- end -}}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: {{ .Values.service }}
+  labels:
+    {{- include "cb-service.labels" . | nindent 4 }}
 spec:
   scaleTargetRef:
     apiVersion: argoproj.io/v1alpha1
     kind: Rollout
     name: {{ .Values.service }}
   minReplicas: {{ .Values.replicas.min }}
+  # Sized so this cell can take 100% of traffic:
+  #   maxReplicas = ceil(1.2 × peak_gateway_rps_all_cells × fanout / per_pod_rps)
+  # per_pod_rps is not measured yet (k6, Week 5): see gitops/cells/<cell>/capacity.yaml.
   maxReplicas: {{ .Values.replicas.max }}
   metrics:
     - type: Resource
@@ -328,27 +441,160 @@ spec:
       policies: [{ type: Percent, value: 100, periodSeconds: 30 }]
     scaleDown:
       stabilizationWindowSeconds: 300
-```
+{{- end }}
 
-```yaml
-# gitops/charts/order-service/templates/pdb.yaml
+{{- define "cb-service.pdb" -}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: {{ .Values.service }}
+  labels:
+    {{- include "cb-service.labels" . | nindent 4 }}
 spec:
   minAvailable: 1
   selector:
-    matchLabels: { app: {{ .Values.service }} }
+    matchLabels:
+      app: {{ .Values.service }}
+{{- end }}
+
+{{- define "cb-service.ingress" -}}
+{{- $domain := required "domain is set by gitops/global/values.yaml" .Values.domain -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Values.service }}
+  labels:
+    {{- include "cb-service.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ required "ingress.className is set by the cell" .Values.ingress.className }}
+  tls:
+    # Cloudflare Origin CA certificate (Full strict): written by Ansible origin_tls on budget cells.
+    - secretName: origin-tls
+      hosts:
+        - app.{{ $domain }}
+        - admin-{{ .Values.cloud }}.{{ $domain }}
+  rules:
+    # app: the Cloudflare load balancer. admin-<cloud>: a proxied record straight at this cell's
+    # origin, behind Cloudflare Access (the lease allocator must reach one specific cell).
+    {{- range list (printf "app.%s" $domain) (printf "admin-%s.%s" .Values.cloud $domain) }}
+    - host: {{ . }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Values.service }}
+                port: { name: http }
+    {{- end }}
+{{- end }}
 ```
 
 ```yaml
-# gitops/charts/platform-addons/templates/networkpolicy-default-deny.yaml
+# gitops/charts/order-service/Chart.yaml
+apiVersion: v2
+name: order-service
+description: "Orders: idempotent claim, reserve, commit saga and the outbox relay."
+type: application
+version: 0.1.0
+dependencies:
+  - name: cb-service
+    version: 0.1.0
+    repository: file://../cb-service
+```
+
+```yaml
+# gitops/charts/order-service/values.yaml
+# Service defaults. Per-cloud values come only from gitops/cells/<cell>/values.yaml,
+# image digests only from gitops/releases/<ring>.yaml.
+service: order-service
+port: 8081
+managementPort: 9080
+replicas:
+  min: 2
+  max: 10             # TODO(Week 5): derive from k6 per-pod RPS (see the HPA comment)
+resources:
+  requests: { cpu: 300m, memory: 448Mi }
+  limits: { cpu: "1", memory: 640Mi }
+javaToolOptions: "-XX:+UseSerialGC -Xss512k"
+database: true
+cache: true
+env:
+  INVENTORY_URL: "http://inventory-service:8082"
+ingress:
+  enabled: false
+analysis:
+  enabled: false        # Week 5 turns this on with the in-cell Prometheus
+```
+
+```yaml
+# gitops/charts/platform-addons/values.yaml
+# Defaults. Cells override only what gitops/cells/<cell>/values.yaml is allowed to differ in.
+cell: ""
+cloud: ""
+domain: ""
+
+# Child Applications (argo-rollouts, traefik) live in Argo CD's namespace and pull upstream charts.
+argocdNamespace: argocd
+
+addons:
+  argoRollouts:
+    chartVersion: 2.43.7        # Argo Rollouts v1.10.1
+  traefik:
+    chartVersion: 41.7.1        # Traefik v3.7.14; installed only where ingress.className is traefik
+
+ingress:
+  className: ""
+
+# Canary analysis queries an in-cell Prometheus, which arrives with observability in Week 5.
+analysis:
+  enabled: false
+  prometheusAddress: http://prometheus-query.monitoring:9090
+  maxErrorRate: "0.01"
+  maxP95Seconds: "0.3"
+
+network:
+  # Where ingress traffic to the gateway comes from: the controller's namespace (k3s Traefik) or
+  # load balancer CIDRs (managed cells set these in their cell values).
+  ingressNamespaces: []
+  ingressCidrs: []
+  # Managed data services (RDS / Cloud SQL / ElastiCache / Memorystore) live outside the cluster.
+  dataCidrs: []
+  monitoringNamespace: monitoring
+
+# Budget profile only: Postgres and Valkey run in the cluster. Credentials come from the cell-db /
+# cell-cache Secrets that Ansible writes on the VM; Argo CD never sees a password.
+budgetData:
+  enabled: false
+  postgres:
+    image: postgres:18.4-alpine
+    storage: 5Gi
+    resources:
+      requests: { cpu: 100m, memory: 160Mi }
+      limits: { memory: 256Mi }
+  valkey:
+    image: valkey/valkey:9.0-alpine
+    maxmemory: 48mb
+    resources:
+      requests: { cpu: 25m, memory: 48Mi }
+      limits: { memory: 96Mi }
+```
+
+```yaml
+# gitops/charts/platform-addons/templates/networkpolicies.yaml
+{{- /*
+cb-app is default-deny in both directions; every flow below is named. Enforced by k3s's built-in
+policy controller, GKE Dataplane V2 and the EKS VPC CNI network policy agent alike.
+*/ -}}
+{{- $apps := list "api-gateway" "order-service" "inventory-service" -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny
-  namespace: cb-app
 spec:
   podSelector: {}
   policyTypes: [Ingress, Egress]
@@ -357,104 +603,288 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-dns
-  namespace: cb-app
 spec:
   podSelector: {}
   policyTypes: [Egress]
   egress:
-    - ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+---
+# Public traffic reaches only the gateway, and only from the ingress controller / load balancer.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingress-to-gateway
+spec:
+  podSelector:
+    matchLabels: { app: api-gateway }
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{ port: 8080 }]
+      from:
+        {{- range .Values.network.ingressNamespaces }}
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ . }} }
+        {{- end }}
+        {{- range .Values.network.ingressCidrs }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+        {{- if and (empty .Values.network.ingressNamespaces) (empty .Values.network.ingressCidrs) }}
+        {{- fail "network.ingressNamespaces or network.ingressCidrs must be set by the cell" }}
+        {{- end }}
+---
+# Gateway → order (routes + readiness probe for /healthz/cell) and → inventory (GET /inventory).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-egress
+spec:
+  podSelector:
+    matchLabels: { app: api-gateway }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: order-service } } }]
+      ports: [{ port: 8081 }, { port: 9080 }]
+    - to: [{ podSelector: { matchLabels: { app: inventory-service } } }]
+      ports: [{ port: 8082 }]
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: gateway-to-backends
-  namespace: cb-app
+  name: order-ingress
 spec:
   podSelector:
-    matchExpressions: [{ key: app, operator: In, values: [order-service, inventory-service] }]
+    matchLabels: { app: order-service }
   policyTypes: [Ingress]
   ingress:
     - from: [{ podSelector: { matchLabels: { app: api-gateway } } }]
-```
-Plus: ingress-controller → gateway, apps → DB/cache CIDRs (from cell values), Prometheus agent → app metrics ports.
-
-```yaml
-# gitops/charts/platform-addons/templates/analysis-template.yaml
-apiVersion: argoproj.io/v1alpha1
-kind: ClusterAnalysisTemplate
+      ports: [{ port: 8081 }, { port: 9080 }]
+---
+# Order → inventory: POST /reservations is internal and never routed by the gateway.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: cb-canary-health
+  name: order-egress
 spec:
-  args:
-    - name: service
-    - name: cell
-  metrics:
-    - name: error-rate
-      interval: 1m
-      count: 5
-      failureLimit: 1
-      successCondition: result[0] < 0.01
-      provider:
-        prometheus:
-          address: http://prometheus-agent-query.monitoring:9090   # in-cell query endpoint (see observability skill)
-          query: |
-            sum(rate(http_server_requests_seconds_count{service="{{args.service}}",status=~"5.."}[2m]))
-            / sum(rate(http_server_requests_seconds_count{service="{{args.service}}"}[2m]))
-    - name: p95
-      interval: 1m
-      count: 5
-      failureLimit: 1
-      successCondition: result[0] < 0.3
-      provider:
-        prometheus:
-          address: http://prometheus-agent-query.monitoring:9090
-          query: |
-            histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{service="{{args.service}}"}[2m])))
+  podSelector:
+    matchLabels: { app: order-service }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: inventory-service } } }]
+      ports: [{ port: 8082 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inventory-ingress
+spec:
+  podSelector:
+    matchLabels: { app: inventory-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: api-gateway } }
+        - podSelector: { matchLabels: { app: order-service } }
+      ports: [{ port: 8082 }]
+---
+# Apps → the cell's Postgres and Valkey (in-cluster on budget, CIDRs on managed).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: apps-to-data
+spec:
+  podSelector:
+    matchExpressions: [{ key: app, operator: In, values: {{ toJson $apps }} }]
+  policyTypes: [Egress]
+  egress:
+    {{- if .Values.budgetData.enabled }}
+    - to: [{ podSelector: { matchLabels: { app: postgres } } }]
+      ports: [{ port: 5432 }]
+    - to: [{ podSelector: { matchLabels: { app: valkey } } }]
+      ports: [{ port: 6379 }]
+    {{- end }}
+    {{- range .Values.network.dataCidrs }}
+    - to: [{ ipBlock: { cidr: {{ . }} } }]
+      ports: [{ port: 5432 }, { port: 6379 }]
+    {{- end }}
+{{- if .Values.budgetData.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: data-ingress
+spec:
+  podSelector:
+    matchExpressions: [{ key: app, operator: In, values: [postgres, valkey] }]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions: [{ key: app, operator: In, values: {{ toJson $apps }} }]
+{{- end }}
+---
+# Metrics on the management port, for the in-cell Prometheus agent only (Week 5).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: metrics-from-monitoring
+spec:
+  podSelector:
+    matchExpressions: [{ key: app, operator: In, values: {{ toJson $apps }} }]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Values.network.monitoringNamespace }} }
+      ports: [{ port: 9080 }]
 ```
-Use `kind: ClusterAnalysisTemplate` (cluster-scoped) or change the Rollout step to `clusterScope: true` — keep the two consistent. Prometheus in agent mode can't answer queries, so each cell runs a small query-capable Prometheus for Rollouts analysis (short retention) alongside the agent — or point Rollouts at the central receiver with a `cb_cell` filter. Pick one and document it.
-
-## 5. Per-cell values, ring files, capacity
 
 ```yaml
-# gitops/cells/cb-gcp-prod/values.yaml
-cell: cb-gcp-prod
-cloud: gcp
-imageRegistryMirror: asia-south1-docker.pkg.dev/cloudbridge-prod/dockerhub
-secretStore: gcp-secret-manager
-ingress:
-  className: gce
-  annotations:
-    kubernetes.io/ingress.global-static-ip-name: cb-gcp-prod-ingress
+# gitops/charts/platform-addons/templates/addon-applications.yaml
+{{- /*
+Third-party add-ons as child Argo CD Applications (app of apps): Argo CD owns them like everything
+else, and their versions are pinned here, so a parity check can compare them across cells.
+*/ -}}
+{{- define "platform-addons.appSync" -}}
+syncPolicy:
+  automated:
+    prune: true
+    selfHeal: true
+  syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true        # large CRDs exceed the client-side last-applied annotation limit
+  retry:
+    limit: 10
+    backoff: { duration: 15s, factor: 2, maxDuration: 5m }
+{{- end }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-rollouts
+  namespace: {{ .Values.argocdNamespace }}
+  labels: { cb-cell: {{ required "cell is set by the cell values" .Values.cell }} }
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-rollouts
+    targetRevision: {{ .Values.addons.argoRollouts.chartVersion | quote }}
+    helm:
+      valuesObject:
+        controller:
+          replicas: 1               # one controller per cell is enough; a restart only pauses rollouts
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 160Mi }
+        dashboard:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-rollouts
+  {{- include "platform-addons.appSync" . | nindent 2 }}
+{{- if eq .Values.ingress.className "traefik" }}
+---
+# k3s ships Traefik, but the k3s_server role disables it: Argo CD installs it here instead, so the
+# ingress controller has one owner and a pinned version like every other add-on.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik
+  namespace: {{ .Values.argocdNamespace }}
+  labels: { cb-cell: {{ .Values.cell }} }
+spec:
+  project: default
+  source:
+    repoURL: https://traefik.github.io/charts
+    chart: traefik
+    targetRevision: {{ .Values.addons.traefik.chartVersion | quote }}
+    helm:
+      valuesObject:
+        ingressClass:
+          enabled: true
+          isDefaultClass: true
+        ports:
+          web:
+            expose:
+              default: false        # origins accept 443 only (Cloudflare Full strict)
+        service:
+          type: LoadBalancer        # k3s ServiceLB binds 443 on the VM's address
+        resources:
+          requests: { cpu: 25m, memory: 48Mi }
+          limits: { memory: 128Mi }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: traefik
+  {{- include "platform-addons.appSync" . | nindent 2 }}
+{{- end }}
+```
+
+Also in `platform-addons`: `analysis-template.yaml` (the `ClusterAnalysisTemplate`, rendered only when `analysis.enabled`) and `budget-data.yaml` (Postgres StatefulSet on k3s local-path storage, Valkey Deployment; both restricted-PSS compliant, credentials from the `cell-db` / `cell-cache` Secrets Ansible writes).
+
+## 5. Global + per-cell values, ring files, capacity
+
+Three value files, merged in order: `gitops/global/values.yaml` (shared; Terraform reads `domain` from it too), `gitops/cells/<cell>/values.yaml`, `gitops/releases/<ring>.yaml`.
+
+```yaml
+# gitops/global/values.yaml
+# Values every cell shares. Terraform reads `domain` from this file too (global/30-traffic), so the
+# Cloudflare hostnames and the Ingress hosts can't disagree.
+domain: cloudbridge.example     # REPLACE with your Cloudflare zone before the first apply
 ```
 
 ```yaml
 # gitops/cells/cb-aws-budget/values.yaml
+# The ONLY per-cloud app config. Allowed to differ between cells: cell, cloud, ingress class and
+# annotations, imageRegistryMirror, secretStore, network sources, and the budget profile's replica
+# floors, resource overrides and in-cluster data. Anything else is parity drift.
 cell: cb-aws-budget
 cloud: aws
+# k3s registries.yaml authenticates every Docker Hub pull with a token, so pods pull by digest from
+# docker.io without anonymous rate limits. Managed cells use ECR pull-through / Artifact Registry.
 imageRegistryMirror: docker.io
-secretStore: aws-secrets-manager
+secretStore: ansible (from AWS Secrets Manager)
 ingress:
   className: traefik
+network:
+  ingressNamespaces: [traefik]
+budgetData:
+  enabled: true
+# 2 GiB VM shared with k3s, Argo CD, Traefik, Rollouts, Postgres and Valkey.
 replicas:
   min: 1
   max: 2
+resourceOverrides:
+  api-gateway:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 384Mi }
+  order-service:
+    requests: { cpu: 100m, memory: 288Mi }
+    limits: { cpu: "1", memory: 416Mi }
+  inventory-service:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 384Mi }
 ```
 
 ```yaml
-# gitops/releases/ring-canary.yaml   (bot-managed)
+# gitops/releases/ring-canary.yaml
+# GCP cell (canary ring): bot PRs land here first.
+# Bot-managed by tools/bump_ring.py. Digests only: a tag can move, a digest is what was scanned and signed.
 images:
-  api-gateway: <you>/cb-api-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000
-  order-service: <you>/cb-order-service@sha256:0000000000000000000000000000000000000000000000000000000000000000
-  inventory-service: <you>/cb-inventory-service@sha256:0000000000000000000000000000000000000000000000000000000000000000
-releasedAt: "2026-10-08T10:00:00Z"
-commit: 0000000
+  api-gateway: rickyenrico01/cb-api-gateway@sha256:c98a71aacc99e669cce1167a167da2f75af90c31aa06ad53154b8fa7a1530d8a
+  order-service: rickyenrico01/cb-order-service@sha256:c8622e4acf3916c3216382a7ecab026d714de9858b2bd2b71bd282bd4eeaecbc
+  inventory-service: rickyenrico01/cb-inventory-service@sha256:96b43689d19512b4899f02ac006d455820bfdd543162b757e828e5aba02ff100
+releasedAt: "2026-10-15T08:01:30Z"
+commit: 9da9c01
 ```
 
 ```yaml
-# gitops/cells/cb-gcp-prod/capacity.yaml  — measured with k6 (p95 < 300 ms, error < 0.5%)
-measuredAt: "2026-11-01"
+# gitops/cells/cb-gcp-budget/capacity.yaml
+# Per-pod RPS at p95 < 300 ms and errors < 0.5%, measured with k6 against this cell (Week 5).
+# Not measured yet: the capacity check refuses to evacuate into a cell whose numbers are 0.
+measuredAt: null
 perPodRps:
-  api-gateway: 0          # fill from your load test
+  api-gateway: 0
   order-service: 0
   inventory-service: 0
 fanout:                   # downstream calls per gateway request
@@ -464,42 +894,89 @@ fanout:                   # downstream calls per gateway request
 
 ## 6. tools/bump_ring.py
 
+Keeps the ring file's comment header, refuses unknown services and non-digest refs, and validates that every service still has a digest after the bump.
+
 ```python
+# tools/bump_ring.py
 #!/usr/bin/env python3
-"""Update a ring file with new image digests. Usage:
-   bump_ring.py --ring ring-canary --digests digests.env [--from-ring ring-canary]"""
-import argparse, datetime, os, pathlib, re, sys
+"""Update a release ring file with image digests.
+
+New build (ci-app.yml, after main publishes):
+    DOCKERHUB_USER=me bump_ring.py --ring ring-canary --digests digests.env
+Promotion (ring-promote.yml, after the canary soak):
+    bump_ring.py --ring ring-main --from-ring ring-canary
+
+digests.env holds one `service=sha256:<64 hex>` per line. The file's leading comment block is kept.
+"""
+import argparse
+import datetime
+import os
+import pathlib
+import re
+import sys
+
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+RELEASES = ROOT / "gitops" / "releases"
+SERVICES = ("api-gateway", "order-service", "inventory-service")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+REF = re.compile(r"^[a-z0-9][a-z0-9_.-]*/cb-[a-z-]+@sha256:[0-9a-f]{64}$")
+
+
+def read_ring(name: str) -> tuple[str, dict]:
+    text = (RELEASES / f"{name}.yaml").read_text(encoding="utf-8")
+    header = "".join(line for line in text.splitlines(keepends=True) if line.startswith("#"))
+    return header, yaml.safe_load(text) or {}
+
+
+def parse_digests(path: str) -> dict[str, str]:
+    found = {}
+    for line in pathlib.Path(path).read_text(encoding="utf-8").split():
+        svc, _, digest = line.partition("=")
+        if svc not in SERVICES:
+            sys.exit(f"unknown service {svc!r}; expected one of {SERVICES}")
+        if not DIGEST.match(digest):
+            sys.exit(f"bad digest for {svc}: {digest!r}")
+        found[svc] = digest
+    return found
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ring", required=True, choices=["ring-canary", "ring-main"])
-    ap.add_argument("--digests", help="lines of service=sha256:... from the build job")
-    ap.add_argument("--from-ring", help="copy images from another ring (promotion)")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--digests", help="service=sha256:... lines from the build job")
+    src.add_argument("--from-ring", choices=["ring-canary", "ring-main"], help="copy another ring (promotion)")
     a = ap.parse_args()
 
-    path = ROOT / "gitops" / "releases" / f"{a.ring}.yaml"
-    doc = yaml.safe_load(path.read_text()) or {"images": {}}
-    user = os.environ["DOCKERHUB_USER"]
+    header, doc = read_ring(a.ring)
+    images = dict(doc.get("images") or {})
 
     if a.from_ring:
-        src = yaml.safe_load((ROOT / "gitops" / "releases" / f"{a.from_ring}.yaml").read_text())
-        doc["images"] = dict(src["images"])
-        doc["commit"] = src.get("commit")
+        if a.from_ring == a.ring:
+            sys.exit("--from-ring must differ from --ring")
+        _, source = read_ring(a.from_ring)
+        images = dict(source["images"])
+        doc["commit"] = source.get("commit")
     else:
-        for line in pathlib.Path(a.digests).read_text().split():
-            svc, digest = line.split("=", 1)
-            if not DIGEST.match(digest):
-                sys.exit(f"bad digest for {svc}: {digest}")
-            doc["images"][svc] = f"{user}/cb-{svc}@{digest}"
-        doc["commit"] = os.environ.get("GITHUB_SHA", "")[:7]
+        user = os.environ.get("DOCKERHUB_USER", "").strip()
+        if not user:
+            sys.exit("DOCKERHUB_USER is not set")
+        for svc, digest in parse_digests(a.digests).items():
+            images[svc] = f"{user}/cb-{svc}@{digest}"
+        doc["commit"] = os.environ.get("GITHUB_SHA", "")[:7] or doc.get("commit")
 
+    missing = [s for s in SERVICES if not REF.match(images.get(s, ""))]
+    if missing:
+        sys.exit(f"ring {a.ring} would have no valid digest for: {', '.join(missing)}")
+
+    doc["images"] = {s: images[s] for s in SERVICES}
     doc["releasedAt"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    path.write_text(yaml.safe_dump(doc, sort_keys=False))
-    print(f"updated {path}")
+    out = RELEASES / f"{a.ring}.yaml"
+    out.write_text(header + yaml.safe_dump(doc, sort_keys=False), encoding="utf-8", newline="\n")
+    print(f"updated {out.relative_to(ROOT)}")
+
 
 if __name__ == "__main__":
     main()
@@ -512,13 +989,19 @@ The build job below is the implemented, actionlint-clean workflow (SHAs resolved
 - `vars.DOCKERHUB_USER` is empty until configured (and on forks), which makes an invalid tag (`docker.io//cb-…`); fall back to a placeholder.
 - Least privilege: the workflow is `contents: read`; only the build job gets `id-token: write` (cosign keyless). `persist-credentials: false` on checkout.
 - Untrusted-looking values (`steps.build.outputs.digest`, matrix values) go through `env:` into `run:`, never `${{ }}` inside the script.
+- **A PR opened with `GITHUB_TOKEN` triggers no workflows**, so a required `ci-gate` check never reports and the release PR can't merge. Use a fine-grained PAT (`CB_BOT_TOKEN`); the fallback to `github.token` needs "Allow GitHub Actions to create and approve pull requests" and a close/reopen.
 
 ```yaml
+# .github/workflows/ci-app.yml
 # Build, test, scan, sign and publish the cell services.
 # PR: verify (unit + Testcontainers ITs) and a local image build + Trivy scan, nothing pushed.
 # main: the same, then push to Docker Hub, attach SBOM + provenance, cosign keyless sign BY DIGEST,
-#       and upload each digest as an artifact (the canary-ring bump job arrives with gitops/ in Week 2).
-# Repository setup: variable DOCKERHUB_USER, secret DOCKERHUB_TOKEN (Docker Hub access token).
+#       and upload each digest as an artifact; then open a release PR that bumps
+#       gitops/releases/ring-canary.yaml (the GCP cell). Merging it is the deploy.
+# Repository setup: variable DOCKERHUB_USER, secret DOCKERHUB_TOKEN (Docker Hub access token), and
+# optionally secret CB_BOT_TOKEN: a fine-grained PAT (this repo; Contents + Pull requests: read/write).
+# Without it the job falls back to GITHUB_TOKEN (enable "Allow GitHub Actions to create and approve
+# pull requests"); such a PR triggers no workflows, so close and reopen it once to run ci-gate.
 # Every action is pinned to a full commit SHA (tag comment for humans); Dependabot bumps them.
 name: app
 
@@ -628,31 +1111,52 @@ jobs:
           path: digest-${{ matrix.service }}.env
           retention-days: 30
 
-  # Added in Week 2, once gitops/releases/ and tools/bump_ring.py exist:
   promote-canary:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
-      contents: write
+      contents: write # only used when CB_BOT_TOKEN is absent (GITHUB_TOKEN fallback)
       pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@<sha> # pin like the others
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digest-*
           merge-multiple: true
-      - run: cat digest-*.env > digests.env && pip install pyyaml && python3 tools/bump_ring.py --ring ring-canary --digests digests.env
+
+      # Ubuntu 24.04's system Python refuses pip installs (PEP 668); use a managed interpreter.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Bump ring-canary to this build's digests
         env:
           DOCKERHUB_USER: ${{ vars.DOCKERHUB_USER }}
-      - uses: peter-evans/create-pull-request@<sha> # pin like the others
+        run: |
+          cat digest-*.env > "$RUNNER_TEMP/digests.env"
+          rm digest-*.env
+          python -m pip install --quiet pyyaml==6.0.3
+          python tools/bump_ring.py --ring ring-canary --digests "$RUNNER_TEMP/digests.env"
+
+      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          branch: release/canary-${{ github.sha }}
+          token: ${{ secrets.CB_BOT_TOKEN || github.token }}
+          branch: release/canary
+          delete-branch: true
+          add-paths: gitops/releases/ring-canary.yaml
+          commit-message: "release(canary): ${{ github.sha }}"
           title: "release(canary): ${{ github.sha }} → GCP ring"
           labels: release,ring-canary
-          commit-message: "release(canary): ${{ github.sha }}"
+          body: |
+            Bumps `gitops/releases/ring-canary.yaml` to the images built, scanned and signed from ${{ github.sha }}.
+            Merging deploys them to the GCP cell only (Argo CD, then the Rollouts canary). AWS follows
+            through `ring-main` after the soak — one cloud at a time.
 ```
-When only one service changed, the matrix still rebuilds all three (simple and deterministic); to skip unchanged services, add a `paths-filter` job — pinned by SHA.
 
 ## 8. .github/workflows/ring-promote.yml
 

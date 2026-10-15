@@ -1,7 +1,8 @@
 ---
-# Configures the budget-profile VMs Terraform tagged cb-ansible-role = k3s_server, on both clouds.
-# Week 2 adds origin_tls and argocd_autodeploy (they need gitops/ and the Cloudflare origin cert),
-# plus the /healthz/cell smoke test through each origin.
+# Configures the budget-profile VMs Terraform tagged cb-ansible-role = k3s_server, on both clouds,
+# then checks each origin answers /healthz/cell through its own ingress (bypassing Cloudflare).
+# Environment: CB_HOSTNAME (app.<domain>), DOCKERHUB_USER, CB_SSM_BUCKET (AWS), GCP_PROJECT_ID and
+# GCP_OSLOGIN_USER (GCP), plus cloud credentials for the inventories and secret lookups.
 - name: Configure budget-profile k3s cells
   hosts: all
   gather_facts: true
@@ -10,3 +11,26 @@
     - k3s_server
     - registries_mirror
     - node_exporter
+    - cell_secrets
+    - origin_tls
+    - argocd_autodeploy
+
+- name: Smoke test each origin locally (bypasses Cloudflare, checks the ingress path)
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Origin answers /healthz/cell (Argo CD needs a few minutes for the first sync)
+      ansible.builtin.command:
+        argv:
+          - curl
+          - -fsS
+          - -o
+          - /dev/null
+          - --resolve
+          - "{{ lookup('ansible.builtin.env', 'CB_HOSTNAME') }}:443:127.0.0.1"
+          - "https://{{ lookup('ansible.builtin.env', 'CB_HOSTNAME') }}/healthz/cell"
+      register: site_health
+      retries: 40
+      delay: 15
+      until: site_health.rc == 0
+      changed_when: false

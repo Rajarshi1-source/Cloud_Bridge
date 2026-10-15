@@ -1,0 +1,29 @@
+# The ONLY per-cloud app config. Allowed to differ between cells: cell, cloud, ingress class and
+# annotations, imageRegistryMirror, secretStore, network sources, and the budget profile's replica
+# floors, resource overrides and in-cluster data. Anything else is parity drift.
+cell: cb-gcp-budget
+cloud: gcp
+# k3s registries.yaml authenticates every Docker Hub pull with a token, so pods pull by digest from
+# docker.io without anonymous rate limits. Managed cells use ECR pull-through / Artifact Registry.
+imageRegistryMirror: docker.io
+secretStore: ansible (from GCP Secret Manager)
+ingress:
+  className: traefik
+network:
+  ingressNamespaces: [traefik]
+budgetData:
+  enabled: true
+# 2 GiB VM shared with k3s, Argo CD, Traefik, Rollouts, Postgres and Valkey.
+replicas:
+  min: 1
+  max: 2
+resourceOverrides:
+  api-gateway:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 384Mi }
+  order-service:
+    requests: { cpu: 100m, memory: 288Mi }
+    limits: { cpu: "1", memory: 416Mi }
+  inventory-service:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 384Mi }

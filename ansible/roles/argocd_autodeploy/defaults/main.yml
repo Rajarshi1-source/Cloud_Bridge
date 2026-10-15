@@ -1,0 +1,4 @@
+---
+argocd_autodeploy_chart_version: "10.10.5"     # Argo CD v3.5.5
+# The same file Terraform renders for managed cells (one template, two renderers).
+argocd_autodeploy_appset_template: "{{ playbook_dir }}/../../gitops/bootstrap/applicationset.yaml.tftpl"

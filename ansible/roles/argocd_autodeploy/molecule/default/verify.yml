@@ -1,0 +1,56 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars:
+    argocd_autodeploy_dir: /var/lib/rancher/k3s/server/manifests
+  tasks:
+    - name: Read the rendered manifests
+      ansible.builtin.slurp:
+        src: "{{ argocd_autodeploy_dir }}/{{ item }}"
+      loop:
+        - 00-cb-app-namespace.yaml
+        - 05-cell-secrets.yaml
+        - 06-origin-tls.yaml
+        - 10-argocd.yaml
+        - 20-root-appset.yaml
+      register: argocd_autodeploy_files
+      no_log: true
+
+    - name: Parse them
+      ansible.builtin.set_fact:
+        argocd_autodeploy_docs: "{{ argocd_autodeploy_docs | default({}) | combine({item.item: item.content | b64decode | from_yaml_all | list}) }}"
+      loop: "{{ argocd_autodeploy_files.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      no_log: true
+
+    - name: Namespace enforces restricted, Secrets are complete, Argo CD chart is pinned
+      ansible.builtin.assert:
+        that:
+          - argocd_autodeploy_docs['00-cb-app-namespace.yaml'][0].metadata.labels['pod-security.kubernetes.io/enforce'] == 'restricted'
+          - argocd_autodeploy_docs['05-cell-secrets.yaml'] | map(attribute='metadata.name') | list == ['cell-db', 'cell-cache']
+          - argocd_autodeploy_docs['05-cell-secrets.yaml'][0].stringData.password | length == 32
+          - argocd_autodeploy_docs['06-origin-tls.yaml'][0].type == 'kubernetes.io/tls'
+          - argocd_autodeploy_docs['10-argocd.yaml'][0].spec.version == '10.10.5'
+      no_log: true
+
+    - name: Root ApplicationSet has this cell and ring, and Argo CD's own template survived
+      vars:
+        argocd_autodeploy_appset: "{{ argocd_autodeploy_docs['20-root-appset.yaml'][0] }}"
+      ansible.builtin.assert:
+        that:
+          - argocd_autodeploy_appset.spec.template.metadata.name is search('[.]app')
+          - argocd_autodeploy_appset.spec.template.metadata.labels['cb-cell'] == 'cb-gcp-test'
+          - "'$values/gitops/cells/cb-gcp-test/values.yaml' in argocd_autodeploy_appset.spec.template.spec.sources[0].helm.valueFiles"
+          - "'$values/gitops/releases/ring-canary.yaml' in argocd_autodeploy_appset.spec.template.spec.sources[0].helm.valueFiles"
+
+    - name: Read the generated database password file
+      ansible.builtin.stat:
+        path: /var/lib/cloudbridge/db-password
+      register: argocd_autodeploy_pw
+
+    - name: Password file is private
+      ansible.builtin.assert:
+        that:
+          - argocd_autodeploy_pw.stat.mode == '0600'

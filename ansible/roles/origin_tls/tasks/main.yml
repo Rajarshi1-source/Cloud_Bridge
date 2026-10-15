@@ -1,0 +1,44 @@
+---
+# The Origin CA certificate and key are created by infra/live/global/20-origin-tls and stored in
+# each cloud's secret manager as JSON {"certificate": ..., "private_key": ...}. Each cell reads its
+# own cloud's copy. Tests pass origin_tls_pair directly.
+- name: Read the Origin CA certificate from this cloud's secret manager
+  ansible.builtin.set_fact:
+    origin_tls_pair: >-
+      {{ (lookup('amazon.aws.secretsmanager_secret', 'cb/origin-tls', region='ap-south-1')
+          if cb_secret_backend == 'aws' else
+          lookup('google.cloud.gcp_secret_manager', key='cb-origin-tls',
+                 project=lookup('ansible.builtin.env', 'GCP_PROJECT_ID'), auth_kind='application'))
+         | from_json }}
+  when: origin_tls_pair is not defined
+  no_log: true
+
+- name: The certificate and key look like PEM
+  ansible.builtin.assert:
+    that:
+      - origin_tls_pair.certificate is search('-----BEGIN CERTIFICATE-----')
+      - origin_tls_pair.private_key is search('PRIVATE KEY-----')
+    quiet: true
+  no_log: true
+
+- name: Create the k3s auto-deploy directory
+  ansible.builtin.file:
+    path: "{{ cb_k3s_manifests_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: TLS Secret for the gateway Ingress (Cloudflare connects with Full strict)
+  ansible.builtin.copy:
+    dest: "{{ cb_k3s_manifests_dir }}/06-origin-tls.yaml"
+    mode: "0600"
+    content: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: origin-tls
+        namespace: cb-app
+      type: kubernetes.io/tls
+      data:
+        tls.crt: {{ origin_tls_pair.certificate | b64encode }}
+        tls.key: {{ origin_tls_pair.private_key | b64encode }}
+  no_log: true

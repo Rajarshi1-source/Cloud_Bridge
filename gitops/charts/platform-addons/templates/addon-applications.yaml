@@ -1,0 +1,76 @@
+{{- /*
+Third-party add-ons as child Argo CD Applications (app of apps): Argo CD owns them like everything
+else, and their versions are pinned here, so a parity check can compare them across cells.
+*/ -}}
+{{- define "platform-addons.appSync" -}}
+syncPolicy:
+  automated:
+    prune: true
+    selfHeal: true
+  syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true        # large CRDs exceed the client-side last-applied annotation limit
+  retry:
+    limit: 10
+    backoff: { duration: 15s, factor: 2, maxDuration: 5m }
+{{- end }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-rollouts
+  namespace: {{ .Values.argocdNamespace }}
+  labels: { cb-cell: {{ required "cell is set by the cell values" .Values.cell }} }
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-rollouts
+    targetRevision: {{ .Values.addons.argoRollouts.chartVersion | quote }}
+    helm:
+      valuesObject:
+        controller:
+          replicas: 1               # one controller per cell is enough; a restart only pauses rollouts
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 160Mi }
+        dashboard:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-rollouts
+  {{- include "platform-addons.appSync" . | nindent 2 }}
+{{- if eq .Values.ingress.className "traefik" }}
+---
+# k3s ships Traefik, but the k3s_server role disables it: Argo CD installs it here instead, so the
+# ingress controller has one owner and a pinned version like every other add-on.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik
+  namespace: {{ .Values.argocdNamespace }}
+  labels: { cb-cell: {{ .Values.cell }} }
+spec:
+  project: default
+  source:
+    repoURL: https://traefik.github.io/charts
+    chart: traefik
+    targetRevision: {{ .Values.addons.traefik.chartVersion | quote }}
+    helm:
+      valuesObject:
+        ingressClass:
+          enabled: true
+          isDefaultClass: true
+        ports:
+          web:
+            expose:
+              default: false        # origins accept 443 only (Cloudflare Full strict)
+        service:
+          type: LoadBalancer        # k3s ServiceLB binds 443 on the VM's address
+        resources:
+          requests: { cpu: 25m, memory: 48Mi }
+          limits: { memory: 128Mi }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: traefik
+  {{- include "platform-addons.appSync" . | nindent 2 }}
+{{- end }}

@@ -1,0 +1,4 @@
+---
+cell_secrets_dir: /var/lib/cloudbridge
+cell_secrets_db_user: cell
+cell_secrets_db_name: cell

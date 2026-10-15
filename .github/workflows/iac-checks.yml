@@ -3,6 +3,7 @@
 #   terraform: fmt, validate, contract test + offline stack plans (Terraform 1.15)
 #   tofu:      validate + the same tests on OpenTofu 1.12 (proves the modules stay engine-agnostic)
 #   actions:   actionlint on every workflow
+#   gitops:    helm lint + render every chart for every cell, kubeconform (incl. Argo CRDs)
 #   ansible:   ansible-lint production profile + playbook syntax check
 #   molecule:  k3s_server role converge + idempotence + verify in a container
 name: iac-checks
@@ -12,6 +13,7 @@ on:
     paths:
       - "infra/**"
       - "ansible/**"
+      - "gitops/**"
       - ".github/workflows/**"
       - "tools/dev/iac-check.sh"
       - "tools/dev/ansible-toolbox.Dockerfile"
@@ -20,6 +22,7 @@ on:
     paths:
       - "infra/**"
       - "ansible/**"
+      - "gitops/**"
       - ".github/workflows/**"
       - "tools/dev/iac-check.sh"
       - "tools/dev/ansible-toolbox.Dockerfile"
@@ -38,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [terraform, tofu, actions, ansible, molecule]
+        check: [terraform, tofu, actions, gitops, ansible, molecule]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

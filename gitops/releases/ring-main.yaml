@@ -1,0 +1,8 @@
+# AWS cell (main ring): promoted from ring-canary after the soak.
+# Bot-managed by tools/bump_ring.py. Digests only: a tag can move, a digest is what was scanned and signed.
+images:
+  api-gateway: rickyenrico01/cb-api-gateway@sha256:c98a71aacc99e669cce1167a167da2f75af90c31aa06ad53154b8fa7a1530d8a
+  order-service: rickyenrico01/cb-order-service@sha256:c8622e4acf3916c3216382a7ecab026d714de9858b2bd2b71bd282bd4eeaecbc
+  inventory-service: rickyenrico01/cb-inventory-service@sha256:96b43689d19512b4899f02ac006d455820bfdd543162b757e828e5aba02ff100
+releasedAt: "2026-10-15T08:01:30Z"
+commit: 9da9c01

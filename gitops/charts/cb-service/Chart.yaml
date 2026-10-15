@@ -1,0 +1,8 @@
+apiVersion: v2
+name: cb-service
+description: >-
+  Shared templates for the CloudBridge services (Rollout, Service, HPA, PDB, Ingress). Each service
+  chart depends on this library and supplies only its own values, so every service gets the same
+  probes, security context and spread rules on every cloud.
+type: library
+version: 0.1.0

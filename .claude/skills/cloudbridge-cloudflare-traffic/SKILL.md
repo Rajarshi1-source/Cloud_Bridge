@@ -16,7 +16,7 @@ Full stack files, break-glass script and the observed-split exporter are in `ref
 | Origin `weight` only distributes **within** a pool | With one origin per pool, origin weights do nothing. Split traffic with **pool** weights: `steering_policy = "random"` + `random_steering.pool_weights` (values 0–1) |
 | Load Balancing is a paid Cloudflare add-on (starts around US$5/month for two endpoints) | Not free tier — put it in the cost plan |
 | Monitor interval 60 s × retries 2 | A dead cell is marked unhealthy after roughly 2–3 minutes. Never claim "instant failover" |
-| Provider v5 (`~> 5.22`) is generated from the API schema, releases every 2–3 weeks | Pin the minor, run `terraform validate` on every Renovate bump, expect nested attribute names to shift |
+| Provider v5 (`~> 5.28.0`) is generated from the API schema, releases every 2–3 weeks | Pin the minor, run `terraform validate` + the stack test on every Renovate bump, expect nested attribute names to shift |
 | `proxied = true` | Steering happens per request at the edge; weight changes take effect in seconds, unlike DNS-only steering with client TTL caching |
 | Cloudflare had a multi-hour global outage on 18 Nov 2025 | The edge is the availability ceiling; there's a documented runbook, not a pretend failover |
 
@@ -53,6 +53,10 @@ Each cell owns its own database. Without affinity a user creates an order on AWS
 ## Origin lock-down
 
 Origins accept 443 only from Cloudflare: `data "cloudflare_ip_ranges" "cf" {}` is passed into every cell stack as `cloudflare_ipv4` and used in the AWS security group / GCP firewall. TLS is Full (strict) with a Cloudflare Origin CA certificate on the ingress. Anyone hitting the origin IP directly gets nothing — this also means the observed split can't be skewed by direct-to-origin traffic.
+
+- Admin API (from cloudbridge-cell-services `security-and-api.md`): proxied `admin-<cloud>.<domain>` records straight at each origin, an Access service token for the lease allocator, a `non_identity` policy admitting only it, and one `self_hosted` Access app over both admin hosts (`service_auth_401_redirect = true`). Outputs: `admin_access_aud` for the services' JWT check, the allocator's client ID/secret.
+- Origin certificate lives in its own stack, `global/20-origin-tls` (Origin CA, both clouds' secret managers), so the traffic stack stays Cloudflare-only.
+- The domain comes from `gitops/global/values.yaml`; `tests/stack.tftest.hcl` mocks Cloudflare and overrides both cell states, and proves the weights contract (sum, warm floor, keys, drain).
 
 ## State placement
 
