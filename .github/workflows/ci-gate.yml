@@ -30,10 +30,15 @@ jobs:
           # Workflow runs exist from the moment the event fires (before their jobs queue), so a
           # short settle delay is enough to see every sibling.
           sleep 15
+          SELF_WORKFLOW=$(gh api "repos/$REPO/actions/runs/$SELF" --jq .workflow_id)
           while true; do
+            # Only the newest run of each sibling workflow counts: closing and reopening a PR (or a
+            # re-trigger) leaves superseded runs on the same commit, and an old failure must not
+            # outvote a newer pass. Earlier ci-gate runs are never siblings.
             runs=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&event=pull_request&per_page=100" \
-              --jq "[.workflow_runs[] | select(.id != $SELF)
-                     | {name, status, conclusion, url: .html_url}]")
+              --jq "[.workflow_runs[] | select(.id != $SELF and .workflow_id != $SELF_WORKFLOW)]
+                    | group_by(.workflow_id) | map(max_by(.id))
+                    | map({name, status, conclusion, url: .html_url})")
             pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")
             if [ "$pending" -eq 0 ]; then break; fi
             echo "waiting on $pending run(s): $(jq -r '[.[] | select(.status != "completed") | .name] | join(", ")' <<<"$runs")"
