@@ -316,7 +316,7 @@ run "pool_weights_carry_the_split" {
   command = apply
 
   assert {
-    condition     = sort(values(cloudflare_load_balancer.app.random_steering.pool_weights)) == [0.3, 0.7]
+    condition     = toset(values(cloudflare_load_balancer.app.random_steering.pool_weights)) == toset([0.3, 0.7]) # sort() would stringify
     error_message = "70/30 must become pool weights 0.7/0.3 (pool level, never origin weights)."
   }
   assert {
