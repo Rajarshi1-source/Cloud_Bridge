@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Installs what `make budget-up` runs on the operator's machine (WSL Ubuntu 24.04/26.04), pinned:
+# Installs what `make budget-up` runs on the operator's machine (WSL Ubuntu 24.04/26.04), pinned and
+# integrity-checked (Terraform SHA256SUMS, AWS CLI + Session Manager plugin GPG signatures, signed apt repo):
 # terraform, AWS CLI v2 + Session Manager plugin, gcloud, make/jq, and ansible-core in a venv.
 # Everything else (lint, tests) already runs in containers via tools/dev/iac-check.sh.
 #   bash tools/dev/install-deploy-tools.sh
@@ -8,6 +9,8 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 TERRAFORM_VERSION=1.15.9
 ANSIBLE_CORE_VERSION=2.21.5
+AWS_CLI_VERSION=2.38.1
+SSM_PLUGIN_VERSION=1.2.896.0
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SUDO=$([ "$(id -u)" -eq 0 ] && echo "" || echo sudo)
 ARCH=$(dpkg --print-architecture)               # amd64 | arm64
@@ -27,15 +30,31 @@ if ! terraform version 2>/dev/null | grep -q "v$TERRAFORM_VERSION"; then
   unzip -oq "$tmp/$zip" -d "$tmp" && $SUDO install -m 0755 "$tmp/terraform" /usr/local/bin/terraform
 fi
 
-echo "== AWS CLI v2 + Session Manager plugin"
-if ! command -v aws >/dev/null; then
+# Verify a detached signature with a key committed in tools/dev/keys/ (copied from AWS's install docs),
+# in a throwaway keyring, and require that exact signing key: a valid signature from any other key fails.
+verify_sig() { # verify_sig <key.asc> <expected primary fingerprint> <file.sig> <file>
+  local home; home=$(mktemp -d)
+  gpg --homedir "$home" --batch --quiet --import "$1" 2>/dev/null
+  if ! gpg --homedir "$home" --batch --status-fd 1 --verify "$3" "$4" 2>/dev/null \
+      | grep -Eq "^\[GNUPG:\] VALIDSIG .* $2\$"; then
+    echo "SIGNATURE CHECK FAILED for $(basename "$4"): not installing"; rm -rf "$home"; exit 1
+  fi
+  rm -rf "$home"; echo "signature OK: $(basename "$4")"
+}
+
+echo "== AWS CLI $AWS_CLI_VERSION + Session Manager plugin $SSM_PLUGIN_VERSION (signatures verified)"
+if ! aws --version 2>/dev/null | grep -q "aws-cli/$AWS_CLI_VERSION "; then
   a=$([ "$ARCH" = arm64 ] && echo aarch64 || echo x86_64)
-  curl -fsSL -o "$tmp/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-$a.zip"
-  unzip -q "$tmp/awscli.zip" -d "$tmp" && $SUDO "$tmp/aws/install" >/dev/null
+  url="https://awscli.amazonaws.com/awscli-exe-linux-$a-$AWS_CLI_VERSION.zip"
+  curl -fsSL -o "$tmp/awscli.zip" "$url" && curl -fsSL -o "$tmp/awscli.zip.sig" "$url.sig"
+  verify_sig "$REPO/tools/dev/keys/aws-cli.asc" FB5DB77FD5C118B80511ADA8A6310ACC4672475C "$tmp/awscli.zip.sig" "$tmp/awscli.zip"
+  unzip -q "$tmp/awscli.zip" -d "$tmp" && $SUDO "$tmp/aws/install" --update >/dev/null
 fi
-if ! command -v session-manager-plugin >/dev/null; then
+if ! session-manager-plugin --version 2>/dev/null | grep -qx "$SSM_PLUGIN_VERSION"; then
   p=$([ "$ARCH" = arm64 ] && echo ubuntu_arm64 || echo ubuntu_64bit)
-  curl -fsSL -o "$tmp/ssm.deb" "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/$p/session-manager-plugin.deb"
+  url="https://s3.amazonaws.com/session-manager-downloads/plugin/$SSM_PLUGIN_VERSION/$p/session-manager-plugin.deb"
+  curl -fsSL -o "$tmp/ssm.deb" "$url" && curl -fsSL -o "$tmp/ssm.deb.sig" "$url.sig"
+  verify_sig "$REPO/tools/dev/keys/session-manager-plugin.asc" 7959637124CE093AD501D47A2C4D4AFF6F6757EE "$tmp/ssm.deb.sig" "$tmp/ssm.deb"
   $SUDO dpkg -i "$tmp/ssm.deb" >/dev/null
 fi
 

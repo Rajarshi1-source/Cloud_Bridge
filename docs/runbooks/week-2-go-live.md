@@ -157,8 +157,9 @@ India-specific (not confirmed in official docs; check during sign-up):
 
 1. **Tools.** Nothing that `make budget-up` calls was installed in WSL: make, jq, terraform, ansible,
    aws, the Session Manager plugin and gcloud. The checks so far ran in containers. One script installs
-   them all, pinned and checksum-verified where the vendor publishes sums. It was tested on a clean
-   Ubuntu 26.04:
+   them all, pinned and integrity-checked: Terraform against its SHA256SUMS, the AWS CLI and
+   Session Manager plugin against AWS's GPG signatures (keys in `tools/dev/keys/`), gcloud from Google's
+   signed apt repository. It was tested on a clean Ubuntu 26.04, including refusing a bad signature:
    ```bash
    bash tools/dev/install-deploy-tools.sh
    source ~/.venvs/cloudbridge/bin/activate     # in every shell that deploys
