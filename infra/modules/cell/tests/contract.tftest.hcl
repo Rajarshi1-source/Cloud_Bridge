@@ -30,6 +30,17 @@ mock_provider "aws" {
       certificate_authority = [{ data = "Y2E=" }]
     }
   }
+  # ECR validates the pull-through rule's credential_arn as an ARN.
+  mock_data "aws_secretsmanager_secret" {
+    defaults = {
+      arn = "arn:aws:secretsmanager:ap-south-1:111122223333:secret:ecr-pullthroughcache/cb-dockerhub-AbCdEf"
+    }
+  }
+  mock_data "aws_caller_identity" {
+    defaults = {
+      account_id = "111122223333"
+    }
+  }
   mock_resource "aws_db_instance" {
     defaults = {
       master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:ap-south-1:111122223333:secret:db", kms_key_id = "", secret_status = "active" }]
@@ -39,6 +50,11 @@ mock_provider "aws" {
 
 mock_provider "google" {
   # Cloud SQL validates private_network as a network self-link, so the mocked id must look like one.
+  mock_data "google_project" {
+    defaults = {
+      number = "123456789012"
+    }
+  }
   mock_resource "google_compute_network" {
     defaults = {
       id = "projects/cb-test/global/networks/cb-gcp-test"
@@ -57,6 +73,7 @@ variables {
   region          = "ap-south-1"
   cloudflare_ipv4 = ["173.245.48.0/20"]
   gcp_project_id  = "cb-test"
+  admin_cidrs     = ["203.0.113.10/32"]
 }
 
 run "aws_managed_contract" {
@@ -74,6 +91,10 @@ run "aws_managed_contract" {
     condition     = output.database != null
     error_message = "Managed profile must provide a managed database."
   }
+  assert {
+    condition     = output.cell.image_mirror == "111122223333.dkr.ecr.ap-south-1.amazonaws.com/dockerhub"
+    error_message = "Managed AWS cells pull through the ECR pull-through cache."
+  }
 }
 
 run "gcp_managed_contract" {
@@ -87,6 +108,10 @@ run "gcp_managed_contract" {
   assert {
     condition     = alltrue([for k in ["name", "endpoint", "ca_certificate", "k8s_version", "origin", "node_security_group", "auth"] : contains(keys(output.cluster), k)])
     error_message = "GCP managed cluster contract keys missing."
+  }
+  assert {
+    condition     = output.cell.image_mirror == "asia-south1-docker.pkg.dev/cb-test/dockerhub"
+    error_message = "Managed GCP cells pull through the Artifact Registry remote repository."
   }
 }
 
@@ -103,6 +128,10 @@ run "aws_budget_contract" {
   assert {
     condition     = output.cell.shape.mem_gib == 2
     error_message = "Budget shape must be the 2 GiB pair."
+  }
+  assert {
+    condition     = output.cell.image_mirror == "docker.io" && output.cell.expires_at == null
+    error_message = "Budget cells pull docker.io (k3s registry token) and never expire."
   }
 }
 
@@ -130,6 +159,101 @@ run "shape_parity_standard" {
     condition     = output.cell.shape.vcpu == 2 && output.cell.shape.mem_gib == 8
     error_message = "standard must be 2 vCPU / 8 GiB on every cloud."
   }
+}
+
+# Ephemeral managed cells (Week 3): apply works because nothing carries prevent_destroy, the expiry
+# reaches the outputs the TTL reaper reads, and data runs in-cluster.
+run "aws_ephemeral_managed" {
+  command = apply
+  variables {
+    cloud                = "aws"
+    profile              = "managed"
+    env                  = "dev"
+    managed_data         = false
+    expires_at           = "1792180800"
+    admin_principal_arns = ["arn:aws:iam::111122223333:role/cb-ephemeral-aws"]
+  }
+  assert {
+    condition     = output.database == null && output.cache == null && output.cell.expires_at == "1792180800"
+    error_message = "An ephemeral AWS cell has no managed data and carries its expiry."
+  }
+}
+
+run "gcp_ephemeral_managed" {
+  command = apply
+  variables {
+    cloud        = "gcp"
+    profile      = "managed"
+    env          = "dev"
+    region       = "asia-south1"
+    managed_data = false
+    expires_at   = "1792180800"
+  }
+  assert {
+    condition     = output.database == null && output.cache == null && output.cluster.auth.kind == "gcp-gke"
+    error_message = "An ephemeral GCP cell is a GKE cluster without managed data."
+  }
+}
+
+run "rejects_managed_without_admin_cidrs" {
+  command = plan
+  variables {
+    cloud       = "gcp"
+    region      = "asia-south1"
+    admin_cidrs = []
+  }
+  expect_failures = [terraform_data.guards]
+}
+
+run "rejects_world_open_api" {
+  command = plan
+  variables {
+    cloud       = "aws"
+    admin_cidrs = ["0.0.0.0/0"]
+  }
+  expect_failures = [terraform_data.guards]
+}
+
+run "rejects_expiring_prod" {
+  command = plan
+  variables {
+    cloud        = "aws"
+    env          = "prod"
+    managed_data = false
+    expires_at   = "1792180800"
+  }
+  expect_failures = [terraform_data.guards]
+}
+
+run "rejects_expiring_cell_with_managed_data" {
+  command = plan
+  variables {
+    cloud      = "aws"
+    env        = "dev"
+    expires_at = "1792180800"
+  }
+  expect_failures = [terraform_data.guards]
+}
+
+run "rejects_budget_without_cloudflare_ranges" {
+  command = plan
+  variables {
+    cloud           = "aws"
+    profile         = "budget"
+    cloudflare_ipv4 = []
+  }
+  expect_failures = [terraform_data.guards]
+}
+
+run "rejects_malformed_expiry" {
+  command = plan
+  variables {
+    cloud        = "aws"
+    env          = "dev"
+    managed_data = false
+    expires_at   = "2026-10-16T20:00:00Z"
+  }
+  expect_failures = [var.expires_at]
 }
 
 run "rejects_unknown_cloud" {

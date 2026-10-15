@@ -39,7 +39,8 @@ variable "max" {
 }
 
 variable "admin_cidrs" {
-  type = list(string)
+  type        = list(string)
+  description = "CIDRs allowed to reach the public API endpoint. Never empty or 0.0.0.0/0: enforced by the cell facade's guards."
 }
 
 variable "labels" {

@@ -39,11 +39,11 @@ infra/live/global/30-traffic             Cloudflare (owned by cloudbridge-cloudf
 
 ## The facade contract
 
-`modules/cell` takes `cloud`, `profile`, `env`, `region`, `shape`, `kubernetes_minor`, `node_count`, `node_max`, `admin_cidrs`, `cloudflare_ipv4`, `gcp_project_id`, `ci_role_arn`, `managed_cache` and returns exactly four outputs:
+`modules/cell` takes `cloud`, `profile`, `env`, `region`, `shape`, `kubernetes_minor`, `node_count`, `node_max`, `admin_cidrs`, `cloudflare_ipv4`, `gcp_project_id`, `ci_role_arn`, `managed_cache`, plus (Week 3) `managed_data`, `expires_at`, `admin_principal_arns`, `image_mirror`, `dockerhub_credentials_secret`, `dockerhub_user`, and returns exactly four outputs:
 
 | Output | Shape | Notes |
 |---|---|---|
-| `cell` | `{name, cloud, profile, region, shape, origin}` | `origin` = what Cloudflare points at |
+| `cell` | `{name, cloud, profile, region, shape, origin, image_mirror, expires_at}` | `origin` = what Cloudflare points at; `image_mirror` = the charts' `imageRegistryMirror` (`docker.io` on budget); `expires_at` = what the TTL reaper reads (null = never) |
 | `cluster` (sensitive) | `{name, endpoint, ca_certificate, k8s_version, origin, node_security_group, auth}` | identical keys for EKS, GKE, k3s-aws, k3s-gcp |
 | `database` (sensitive) | `{host, port, secret_ref}` or `null` | `null` → bootstrap installs in-cluster Postgres |
 | `cache` (sensitive) | `{host, port, tls}` or `null` | `null` → in-cluster Valkey |
@@ -57,6 +57,10 @@ locals {
   database = one(concat(module.db_aws[*].database, module.db_gcp[*].database))   # null when none
 }
 ```
+
+**Cross-variable rules live in one place:** `resource "terraform_data" "guards"` with `lifecycle { precondition {…} }` in the facade (managed ⇒ `admin_cidrs` non-empty and never `0.0.0.0/0`; budget ⇒ `cloudflare_ipv4` non-empty; prod never expires; an expiring cell can't own `prevent_destroy` data services). Preconditions behave the same on Terraform and OpenTofu, and tests can `expect_failures = [terraform_data.guards]`. Don't duplicate them as validations inside implementation modules: a nested module's variable failure can't be named in `expect_failures`, so the rejection test would fail.
+
+**Ephemeral managed cells** (`live/<cloud>-dev`, Week 3): `expires_at` (Unix seconds, ≤ 8 h, label `cb-expires-at`, digits only so it's a valid AWS tag *and* GCP label) + `managed_data = false` (Postgres/Valkey in-cluster). `prevent_destroy` can't be a variable, so "reapable" means "no managed data services" — the facade refuses the other combination.
 
 Use `one(concat(...))`, not `var.cloud == "aws" ? module.eks[0] : module.gke[0]`. The conditional has to unify both branch types and indexing an empty module list errors; `one()` returns the single instantiated implementation and fails loudly if `count` logic ever instantiates two.
 
@@ -75,7 +79,7 @@ Every pair must match vCPU, memory and CPU class. Rev 1 mapped `t3.large` (2/8) 
 
 ## Implementation rules
 
-**EKS** — `access_config.authentication_mode = "API"` with `aws_eks_access_entry` + policy association (never the `aws-auth` ConfigMap); `public_access_cidrs = var.admin_cidrs` (never `0.0.0.0/0`); `upgrade_policy.support_type = "STANDARD"` (extended support costs several times more per hour); AL2023 node AMI; `eks-pod-identity-agent` addon; `ignore_changes` on `desired_size` because the autoscaler owns it.
+**EKS** — `access_config.authentication_mode = "API"` with `aws_eks_access_entry` + policy association for every principal in `admin_principal_arns` (never the `aws-auth` ConfigMap; with `bootstrap_cluster_creator_admin_permissions = false` and no entries, nobody can reach the cluster); `aws-ebs-csi-driver` addon (EKS has no working default storage driver without it) and the AWS Load Balancer Controller role, both via **Pod Identity** associations; node role may `ecr:CreateRepository` + `ecr:BatchImportUpstreamImage` on `dockerhub/*` (pull-through cache); `public_access_cidrs = var.admin_cidrs` (never `0.0.0.0/0`); `upgrade_policy.support_type = "STANDARD"` (extended support costs several times more per hour); AL2023 node AMI; `eks-pod-identity-agent` addon; `ignore_changes` on `desired_size` because the autoscaler owns it.
 
 **GKE** — zonal (`location = "<region>-a"`, eligible for GKE's free-tier management credit), `release_channel = REGULAR`, `min_master_version = var.k8s_version`, maintenance window at night IST, `datapath_provider = "ADVANCED_DATAPATH"` (NetworkPolicy enforced), private nodes + master authorized networks, dedicated node service account with only logWriter / metricWriter / monitoring.viewer / artifactregistry.reader, `workload_metadata_config.mode = GKE_METADATA`, shielded nodes, `deletion_protection = var.env == "prod"`.
 
@@ -108,7 +112,7 @@ Every pair must match vCPU, memory and CPU class. Rev 1 mapped `t3.large` (2/8) 
 
 ## Leaky abstractions to keep honest
 
-Pod IAM (Pod Identity vs Workload Identity); ingress origin (ALB hostname known only after the controller runs vs GCLB static IP reserved up front — so the AWS managed origin comes from `20-bootstrap`); burstable CPU models; upgrade cadence (manual vs release channels); NetworkPolicy enablement (VPC CNI flag vs Dataplane V2); Postgres parameter groups vs flags; NAT pricing; tags vs labels charset; registry mirrors (ECR pull-through path prefix vs Artifact Registry remote repo hostname). When a user claims "no lock-in", answer with this list.
+Pod IAM (Pod Identity vs Workload Identity); registry mirror credentials (ECR pull-through needs a Secrets Manager secret named `ecr-pullthroughcache/…` holding `{username, accessToken}`; Artifact Registry remote repos read a Secret Manager version through the AR service agent); ingress origin (ALB hostname known only after the controller runs vs GCLB static IP reserved up front — so the AWS managed origin comes from `20-bootstrap`); burstable CPU models; upgrade cadence (manual vs release channels); NetworkPolicy enablement (VPC CNI flag vs Dataplane V2); Postgres parameter groups vs flags; NAT pricing; tags vs labels charset; registry mirrors (ECR pull-through path prefix vs Artifact Registry remote repo hostname). When a user claims "no lock-in", answer with this list.
 
 ## Interview soundbites
 

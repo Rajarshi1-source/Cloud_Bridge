@@ -27,12 +27,19 @@ variable "max" {
 }
 
 variable "admin_cidrs" {
-  type = list(string)
+  type        = list(string)
+  description = "CIDRs allowed to reach the public API endpoint. Never empty or 0.0.0.0/0: enforced by the cell facade's guards."
 }
 
 variable "ci_role_arn" {
   type    = string
   default = null
+}
+
+variable "admin_arns" {
+  type        = list(string)
+  default     = []
+  description = "IAM principals given cluster-admin through access entries (bootstrap_cluster_creator_admin_permissions is off)."
 }
 
 variable "tags" {

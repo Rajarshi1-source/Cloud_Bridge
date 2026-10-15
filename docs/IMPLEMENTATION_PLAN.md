@@ -376,6 +376,22 @@ The order follows Rev 2 §4.3 and ships first: **a public multi-cloud link by th
 
 ### Week 3: Managed profile (terraform-cells, iac-pipeline)
 
+> **Status (16 Oct 2026): repo side done** on branch `week-3-managed-profile`, checked offline. No cluster has been created yet; that needs the accounts from the Week 2 runbook.
+> - **Facade:** new inputs `managed_data`, `expires_at` (`cb-expires-at` label), `admin_principal_arns`, `image_mirror`. One `terraform_data.guards` enforces the cross-variable rules:
+>   - managed cells need `admin_cidrs`, and never `0.0.0.0/0`
+>   - budget cells need Cloudflare's ranges
+>   - prod never expires
+>   - an expiring cell can't own `prevent_destroy` data services
+>
+>   `cell` also gains `image_mirror` and `expires_at`.
+> - **EKS:** cluster-admin access entries; the EBS CSI driver and AWS Load Balancer Controller (v3.6.0 policy) via Pod Identity; pull-through permissions on the node role.
+> - **GKE:** `auth.project` added to its output.
+> - **Registry mirrors:** `registry-mirror/aws-ecr-ptc` and `registry-mirror/gcp-ar-remote`.
+> - **Ephemeral stacks:** `live/{aws,gcp}-dev/10-foundation`, with `make managed-up | managed-check | managed-down | reap`.
+> - **Workflows:** `global/00-ci-identity` holds the `ephemeral` environment's OIDC/WIF identities only (Week 5 adds plan/apply roles). `ephemeral-up.yml` and `ttl-reaper.yml` both call `tools/dev/reap-expired.sh`, which reads the expiry from state.
+> - **Tests:** contract test 14/14 (4 implementations, 2 ephemeral applies, 6 guard rejections, azure); dev and CI-identity stack tests pass. OpenTofu runs in CI.
+> - **Deviation:** the managed `20-bootstrap` (Argo CD by Terraform, cell values, ingress controller and health checks, External Secrets) moves to Week 4, which builds the data and secrets it needs. Runbook: [week-3-ephemeral-managed.md](runbooks/week-3-ephemeral-managed.md).
+
 - Modules `cluster/aws-eks` (API auth mode, access entries, `public_access_cidrs`, STANDARD support, Pod Identity) and `cluster/gcp-gke` (zonal, REGULAR, Dataplane V2, private nodes, least-privilege SA, Workload Identity).
 - `registry-mirror/{aws-ecr-ptc,gcp-ar-remote}`.
 - `tests/contract.tftest.hcl` covering 4 implementations plus the azure rejection; run on Terraform 1.15 and OpenTofu 1.12.

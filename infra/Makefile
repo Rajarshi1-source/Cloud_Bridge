@@ -6,7 +6,7 @@ ENV   ?= budget
 LAYER ?= 10-foundation
 STACK  = live/$(CLOUD)-$(ENV)/$(LAYER)
 
-.PHONY: fmt test test-tofu plan apply destroy origin-tls traffic configure budget-up budget-down
+.PHONY: fmt test test-tofu plan apply destroy origin-tls traffic configure budget-up budget-down managed-up managed-check managed-down reap
 
 fmt:
 	terraform fmt -recursive -check
@@ -17,6 +17,9 @@ test:
 	cd live/gcp-budget/10-foundation && terraform init -backend=false -input=false && terraform test
 	cd live/global/20-origin-tls && terraform init -backend=false -input=false && terraform test
 	cd live/global/30-traffic && terraform init -backend=false -input=false && terraform test
+	cd live/aws-dev/10-foundation && terraform init -backend=false -input=false && terraform test
+	cd live/gcp-dev/10-foundation && terraform init -backend=false -input=false && terraform test
+	cd live/global/00-ci-identity && terraform init -backend=false -input=false && terraform test
 
 test-tofu:
 	cd modules/cell && tofu init -backend=false -input=false && tofu test
@@ -64,3 +67,31 @@ budget-down:
 	cd live/global/30-traffic && terraform init -input=false && terraform destroy -input=false
 	$(MAKE) destroy CLOUD=gcp ENV=budget
 	$(MAKE) destroy CLOUD=aws ENV=budget
+
+# ---- Ephemeral managed cells (EKS / GKE) for demos: at most 8 hours, then reaped ----
+# make managed-up CLOUD=gcp TTL=4    TTL in hours, 1-8. The API endpoint admits only this machine's
+# public IP. AWS also gives the caller's IAM identity cluster-admin (access entries, no aws-auth).
+TTL ?= 4
+DEV = live/$(CLOUD)-dev/10-foundation
+
+managed-up:
+	@[ "$(TTL)" -ge 1 ] 2>/dev/null && [ "$(TTL)" -le 8 ] || { echo "TTL must be 1-8 hours"; exit 1; }
+	cd $(DEV) && terraform init -input=false && \
+	  TF_VAR_expires_at=$$(( $$(date -u +%s) + $(TTL) * 3600 )) \
+	  TF_VAR_admin_cidrs="[\"$$(curl -fsS https://checkip.amazonaws.com)/32\"]" \
+	  $(if $(filter aws,$(CLOUD)),TF_VAR_admin_principal_arns="[\"$$(aws sts get-caller-identity --query Arn --output text)\"]") \
+	  $(if $(DOCKERHUB_USER),TF_VAR_dockerhub_user=$(DOCKERHUB_USER)) \
+	  terraform plan -input=false -out=tfplan && terraform apply -input=false tfplan
+	$(MAKE) managed-check CLOUD=$(CLOUD)
+
+# Week 3's "done when": every node Ready. Credentials go to their own kubeconfig, not ~/.kube/config.
+managed-check:
+	bash ../tools/dev/managed-check.sh $(CLOUD)
+
+managed-down:
+	cd $(DEV) && terraform init -input=false && \
+	  TF_VAR_expires_at=0000000000 TF_VAR_admin_cidrs='["192.0.2.1/32"]' terraform destroy -input=false
+
+# What ttl-reaper.yml runs hourly; run it by hand when CI identities aren't set up yet.
+reap:
+	bash ../tools/dev/reap-expired.sh $(or $(CLOUDS),aws gcp)

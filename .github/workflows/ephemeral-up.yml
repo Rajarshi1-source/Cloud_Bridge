@@ -1,0 +1,102 @@
+# Bring up an ephemeral managed cell (EKS or GKE) for a demo, at most 8 hours; ttl-reaper.yml
+# destroys it after cb-expires-at. Same stack and same TTL rule as `make managed-up` on a laptop.
+# Setup (once): apply infra/live/global/00-ci-identity, then in Settings → Environments create
+# "ephemeral" (no required reviewers, deployment branches: main) with variables AWS_EPHEMERAL_ROLE,
+# GCP_WIF_PROVIDER, GCP_EPHEMERAL_SA from that stack's outputs.
+name: ephemeral-up
+
+on:
+  workflow_dispatch:
+    inputs:
+      cloud:
+        description: Which cloud
+        type: choice
+        options: [gcp, aws]
+        default: gcp
+      ttl_hours:
+        description: Lifetime in hours (1-8)
+        type: choice
+        options: ["1", "2", "3", "4", "5", "6", "7", "8"]
+        default: "4"
+      admin_cidr:
+        description: Your public IP as a CIDR (e.g. 203.0.113.10/32); the only address the API admits
+        type: string
+        required: true
+      admin_arn:
+        description: "AWS only: your IAM ARN, granted cluster-admin (optional)"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ephemeral-${{ inputs.cloud }} # never two applies (or an apply and a reap) on one stack
+  cancel-in-progress: false
+
+jobs:
+  up:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ephemeral
+    permissions:
+      contents: read
+      id-token: write # OIDC to AWS / GCP; no stored cloud keys
+    env:
+      CLOUD: ${{ inputs.cloud }}
+      STACK: infra/live/${{ inputs.cloud }}-dev/10-foundation
+    steps:
+      - name: Refuse a world-open or malformed API allowlist
+        env:
+          ADMIN_CIDR: ${{ inputs.admin_cidr }}
+        run: |
+          if ! [[ "$ADMIN_CIDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/(2[4-9]|3[0-2])$ ]]; then
+            echo "::error::admin_cidr must be one IPv4 address or a small range (/24 to /32)"; exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: inputs.cloud == 'aws'
+        with:
+          role-to-assume: ${{ vars.AWS_EPHEMERAL_ROLE }}
+          aws-region: ap-south-1
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: inputs.cloud == 'gcp'
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_EPHEMERAL_SA }}
+
+      - name: Plan and apply with a TTL
+        env:
+          TTL_HOURS: ${{ inputs.ttl_hours }}
+          ADMIN_CIDR: ${{ inputs.admin_cidr }}
+          ADMIN_ARN: ${{ inputs.admin_arn }}
+          CI_ROLE: ${{ vars.AWS_EPHEMERAL_ROLE }}
+          DOCKERHUB_USER: ${{ vars.DOCKERHUB_USER }}
+        run: |
+          expires=$(( $(date -u +%s) + TTL_HOURS * 3600 ))
+          export TF_VAR_expires_at="$expires" TF_VAR_admin_cidrs="[\"$ADMIN_CIDR\"]"
+          if [ "$CLOUD" = aws ]; then
+            arns=$(jq -nc --arg ci "$CI_ROLE" --arg me "$ADMIN_ARN" '[$ci, $me] | map(select(. != ""))')
+            export TF_VAR_admin_principal_arns="$arns"
+          elif [ -n "$DOCKERHUB_USER" ]; then
+            export TF_VAR_dockerhub_user="$DOCKERHUB_USER"
+          fi
+          terraform -chdir="$STACK" init -input=false -lockfile=readonly
+          terraform -chdir="$STACK" plan -input=false -lock-timeout=5m -out=tfplan
+          terraform -chdir="$STACK" apply -input=false tfplan
+          {
+            echo "### $CLOUD-dev is up"
+            echo "Expires **$(date -u -d "@$expires" +%FT%TZ)** (reaped by ttl-reaper within the following hour)."
+            echo
+            echo "From the allowed address: \`make -C infra managed-check CLOUD=$CLOUD\`"
+          } >> "$GITHUB_STEP_SUMMARY"

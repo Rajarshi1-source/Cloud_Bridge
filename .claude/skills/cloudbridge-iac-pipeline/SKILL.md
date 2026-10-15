@@ -16,6 +16,7 @@ Workflow files, CI-identity Terraform, the affected-stack detector and Conftest 
 | `cb-plan-aws` | `sub` = `repo:<you>/cloudbridge:pull_request` | ReadOnlyAccess + state bucket read + lock-file write (`use_lockfile` writes a `.tflock` object even during plan) |
 | `cb-apply-aws-<env>` | `sub` = `repo:<you>/cloudbridge:environment:aws-<env>` | Scoped admin for `cb-*` tagged resources + state RW |
 | `cb-plan-gcp` / `cb-apply-gcp-<env>` | WIF provider with `attribute_condition` on `assertion.repository` and `assertion.environment` | Viewer / scoped editor |
+| `cb-ephemeral-aws` / `cb-ephemeral-gcp` (Week 3, the only ones built so far) | `sub` = `repo:<owner>/<repo>:environment:ephemeral`; WIF `principalSet …/attribute.environment/ephemeral` | AWS: PowerUserAccess + IAM only on `cb-*` roles/instance profiles + state `aws-dev/*`; GCP: container/network/security admin, SA admin, projectIamAdmin (GKE node account grants), AR + Secret Manager admin, state objects under `gcp-dev/` (plus `legacyBucketReader`: an object-name IAM condition never matches the bucket-level list permission) |
 | `cb-apply-traffic` | `environment:traffic-prod` | Cloudflare token scoped to one zone's Load Balancing, stored as an **environment** secret (Cloudflare has no OIDC federation for this) |
 
 The environment claim is what makes approvals meaningful: an apply role can only be assumed by a job that is running *inside* a protected environment, i.e. after a reviewer approved it.
@@ -70,8 +71,8 @@ Optional explainer: provider-agnostic adapter (`llm.provider`, `llm.model`, defa
 | Job | Schedule | Behaviour |
 |---|---|---|
 | `drift.yml` | nightly 02:30 IST | `plan -detailed-exitcode` on every live stack with plan identities; exit 2 → issue labelled `drift` containing the summarised diff (never secrets) |
-| `ttl-reaper.yml` | hourly | Finds managed-profile stacks whose `cb-expires-at` passed; destroy via the same plan→apply path; auto-approved only for `*-dev` environments |
-| `ephemeral-up.yml` | manual (`cloud`, `env`, `ttl_hours` ≤ 8) | Applies managed stacks for a demo session, tags `cb-expires-at`, posts URLs to the run summary |
+| `ttl-reaper.yml` | hourly (`17 * * * *`) | Runs `tools/dev/reap-expired.sh` per cloud: reads `expires_at` **from each `*-dev` stack's state** (cloud-agnostic, no tag-search APIs, and it also reaps cells created from a laptop), then `plan -destroy -out` + `apply`. Environment `ephemeral` must have **no required reviewers** or the reaper waits forever; skips a cloud whose identity isn't configured |
+| `ephemeral-up.yml` | manual (`cloud`, `ttl_hours` 1–8, `admin_cidr` /24–/32, optional `admin_arn`) | Applies `live/<cloud>-dev` with `TF_VAR_expires_at`; shares the `ephemeral-<cloud>` concurrency group with the reaper so a reap never runs mid-apply |
 
 ## Workspaces (where the brief's "workspaces" requirement lives)
 

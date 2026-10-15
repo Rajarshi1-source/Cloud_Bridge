@@ -1,0 +1,73 @@
+# Hourly: destroy ephemeral cells whose cb-expires-at has passed. Reads the expiry from each dev
+# stack's state (tools/dev/reap-expired.sh, the same script `make reap` runs), so a cell brought up
+# from a laptop is reaped too. Only *-dev stacks are considered; prod never carries an expiry.
+# Runs in environment "ephemeral" (same OIDC identities as ephemeral-up.yml). That environment must
+# have no required reviewers, or the reaper would wait for an approval that never comes.
+name: ttl-reaper
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  reap:
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, gcp]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ephemeral
+    concurrency:
+      group: ephemeral-${{ matrix.cloud }} # shared with ephemeral-up.yml: never reap mid-apply
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Skip a cloud whose CI identity isn't configured yet
+        id: cfg
+        env:
+          CLOUD: ${{ matrix.cloud }}
+          AWS_ROLE: ${{ vars.AWS_EPHEMERAL_ROLE }}
+          GCP_SA: ${{ vars.GCP_EPHEMERAL_SA }}
+        run: |
+          if { [ "$CLOUD" = aws ] && [ -n "$AWS_ROLE" ]; } || { [ "$CLOUD" = gcp ] && [ -n "$GCP_SA" ]; }; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No CI identity for $CLOUD yet (infra/live/global/00-ci-identity); nothing reaped there. Use 'make reap' meanwhile."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: steps.cfg.outputs.ready == 'true' && matrix.cloud == 'aws'
+        with:
+          role-to-assume: ${{ vars.AWS_EPHEMERAL_ROLE }}
+          aws-region: ap-south-1
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: steps.cfg.outputs.ready == 'true' && matrix.cloud == 'gcp'
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_EPHEMERAL_SA }}
+
+      - name: Destroy if expired
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          CLOUD: ${{ matrix.cloud }}
+        run: bash tools/dev/reap-expired.sh "$CLOUD"

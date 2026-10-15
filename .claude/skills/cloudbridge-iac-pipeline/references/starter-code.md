@@ -138,6 +138,175 @@ resource "google_project_iam_member" "plan_viewer" {
 }
 ```
 
+## 1b. Week 3: the ephemeral identities (implemented)
+
+Built first because `ttl-reaper.yml` can't run without a cloud identity. `aws_iam_openid_connect_provider` no longer needs a thumbprint (AWS trusts GitHub's CA); the trust policy is `jsonencode`d so the stack test can assert the `sub` condition through mocks.
+
+```hcl
+# infra/live/global/00-ci-identity/aws.tf
+# GitHub Actions → AWS without stored keys. The trust is bound to one repository AND one GitHub
+# environment: only a job running inside environment "ephemeral" gets a token with this `sub`.
+resource "aws_iam_openid_connect_provider" "github" {
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
+}
+
+locals {
+  ephemeral_sub = "repo:${var.github_repository}:environment:ephemeral"
+}
+
+resource "aws_iam_role" "ephemeral" {
+  name                 = "cb-ephemeral-aws"
+  description          = "ephemeral-up.yml and ttl-reaper.yml: create and destroy the aws-dev cell"
+  max_session_duration = 7200
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Principal = { Federated = aws_iam_openid_connect_provider.github.arn }
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          "token.actions.githubusercontent.com:sub" = local.ephemeral_sub
+        }
+      }
+    }]
+  })
+}
+
+# Everything except IAM; IAM only for cb-* names (the cell's cluster, node and add-on roles).
+resource "aws_iam_role_policy_attachment" "ephemeral_power_user" {
+  role       = aws_iam_role.ephemeral.name
+  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
+}
+
+resource "aws_iam_role_policy" "ephemeral_iam_scoped" {
+  name = "cb-iam-and-state"
+  role = aws_iam_role.ephemeral.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "CellRoles"
+        Effect = "Allow"
+        Action = [
+          "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:TagRole", "iam:UntagRole",
+          "iam:UpdateAssumeRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies",
+          "iam:PutRolePolicy", "iam:GetRolePolicy", "iam:DeleteRolePolicy",
+          "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PassRole",
+          "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile", "iam:GetInstanceProfile",
+          "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile",
+          "iam:ListInstanceProfilesForRole", "iam:TagInstanceProfile",
+        ]
+        Resource = [
+          "arn:aws:iam::*:role/cb-*",
+          "arn:aws:iam::*:instance-profile/cb-*",
+        ]
+      },
+      {
+        Sid      = "ServiceLinkedRoles"
+        Effect   = "Allow"
+        Action   = "iam:CreateServiceLinkedRole"
+        Resource = "*"
+        Condition = {
+          StringLike = {
+            "iam:AWSServiceName" = ["eks.amazonaws.com", "eks-nodegroup.amazonaws.com", "elasticloadbalancing.amazonaws.com", "autoscaling.amazonaws.com"]
+          }
+        }
+      },
+      {
+        Sid      = "StateBucket"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = "arn:aws:s3:::${var.aws_state_bucket}"
+      },
+      {
+        Sid      = "DevState"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = "arn:aws:s3:::${var.aws_state_bucket}/aws-dev/*" # dev state and its .tflock only
+      },
+    ]
+  })
+}
+```
+
+```hcl
+# infra/live/global/00-ci-identity/gcp.tf
+# GitHub Actions → GCP through Workload Identity Federation. The provider admits tokens from one
+# repository only; the service account admits only the "ephemeral" environment of that repository.
+resource "google_iam_workload_identity_pool" "github" {
+  project                   = var.gcp_project_id
+  workload_identity_pool_id = "github"
+  display_name              = "GitHub Actions"
+}
+
+resource "google_iam_workload_identity_pool_provider" "github" {
+  project                            = var.gcp_project_id
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
+  workload_identity_pool_provider_id = "cloudbridge"
+  attribute_mapping = {
+    "google.subject"        = "assertion.sub"
+    "attribute.repository"  = "assertion.repository"
+    "attribute.environment" = "assertion.environment"
+  }
+  attribute_condition = "assertion.repository == '${var.github_repository}'"
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+}
+
+resource "google_service_account" "ephemeral" {
+  project      = var.gcp_project_id
+  account_id   = "cb-ephemeral-gcp"
+  display_name = "ephemeral-up.yml and ttl-reaper.yml (gcp-dev cell)"
+}
+
+resource "google_service_account_iam_member" "ephemeral_wif" {
+  service_account_id = google_service_account.ephemeral.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.environment/ephemeral"
+}
+
+# What the gcp-dev cell creates: network + NAT, GKE, its node service account and that account's
+# project roles, the Artifact Registry remote repository (and its read of the pull token).
+# projectIamAdmin is the broad one: GKE's node account needs project-level role grants.
+resource "google_project_iam_member" "ephemeral" {
+  for_each = toset([
+    "roles/container.admin",
+    "roles/compute.networkAdmin",
+    "roles/compute.securityAdmin",
+    "roles/iam.serviceAccountAdmin",
+    "roles/iam.serviceAccountUser",
+    "roles/resourcemanager.projectIamAdmin",
+    "roles/artifactregistry.admin",
+    "roles/secretmanager.admin",
+  ])
+  project = var.gcp_project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.ephemeral.email}"
+}
+
+# Listing objects is a bucket-level permission, which an object-name condition never matches; this
+# legacy role grants list (and bucket metadata) without reading any object, e.g. the origin key's state.
+resource "google_storage_bucket_iam_member" "ephemeral_state_list" {
+  bucket = var.gcp_state_bucket
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.ephemeral.email}"
+}
+
+resource "google_storage_bucket_iam_member" "ephemeral_state" {
+  bucket = var.gcp_state_bucket
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.ephemeral.email}"
+  condition {
+    title      = "gcp-dev-state-only"
+    expression = "resource.name.startsWith(\"projects/_/buckets/${var.gcp_state_bucket}/objects/gcp-dev/\")"
+  }
+}
+```
+
 ## 2. `_terraform-stack.yml`
 
 ```yaml
@@ -504,50 +673,231 @@ jobs:
 ```
 `-lock=false` on the read-only drift plan avoids contending with a real apply; `AWS_DRIFT_ROLE` = the plan role trusted for `ref:refs/heads/main` scheduled runs (add that `sub` to the plan role's trust list).
 
+Implemented in Week 3 (actionlint-clean, SHAs resolved 16 Oct 2026). The reaper reads the expiry from state instead of searching tags, and shares its logic with `make reap`:
+
 ```yaml
 # .github/workflows/ttl-reaper.yml
+# Hourly: destroy ephemeral cells whose cb-expires-at has passed. Reads the expiry from each dev
+# stack's state (tools/dev/reap-expired.sh, the same script `make reap` runs), so a cell brought up
+# from a laptop is reaped too. Only *-dev stacks are considered; prod never carries an expiry.
+# Runs in environment "ephemeral" (same OIDC identities as ephemeral-up.yml). That environment must
+# have no required reviewers, or the reaper would wait for an approval that never comes.
 name: ttl-reaper
+
 on:
   schedule:
-    - cron: "15 * * * *"
+    - cron: "17 * * * *"
+  workflow_dispatch: {}
+
 permissions:
   contents: read
-  id-token: write
+
 jobs:
-  find:
-    runs-on: ubuntu-24.04
-    outputs:
-      expired: ${{ steps.f.outputs.expired }}
-    steps:
-      - uses: actions/checkout@<sha>
-      - uses: aws-actions/configure-aws-credentials@<sha>
-        with:
-          role-to-assume: ${{ vars.AWS_PLAN_ROLE }}
-          aws-region: ap-south-1
-      - id: f
-        run: |
-          now=$(date -u +%s)
-          aws resourcegroupstaggingapi get-resources --tag-filters Key=cb-expires-at \
-            --query 'ResourceTagMappingList[].Tags' --output json \
-          | jq -c --argjson now "$now" '[.[] | from_entries
-              | select((."cb-expires-at"|tonumber) < $now)
-              | {path: ("infra/live/" + ."cb-cell"[3:] + "/10-foundation"), cloud: ."cb-cloud", env: (."cb-cloud" + "-dev")}] | unique' \
-          > expired.json
-          echo "expired=$(cat expired.json)" >> "$GITHUB_OUTPUT"
-      # GCP: same idea with `gcloud asset search-all-resources --query="labels.cb-expires-at:*"`
-  destroy:
-    needs: find
-    if: needs.find.outputs.expired != '[]'
+  reap:
     strategy:
+      fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.find.outputs.expired) }}
+        cloud: [aws, gcp]
     runs-on: ubuntu-24.04
-    environment: ${{ matrix.env }}           # dev environments have no required reviewers
+    timeout-minutes: 45
+    environment: ephemeral
+    concurrency:
+      group: ephemeral-${{ matrix.cloud }} # shared with ephemeral-up.yml: never reap mid-apply
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@<sha>
-      - run: echo "terraform -chdir=${{ matrix.path }} plan -destroy -out=tfplan && terraform -chdir=${{ matrix.path }} apply tfplan"
+      - name: Skip a cloud whose CI identity isn't configured yet
+        id: cfg
+        env:
+          CLOUD: ${{ matrix.cloud }}
+          AWS_ROLE: ${{ vars.AWS_EPHEMERAL_ROLE }}
+          GCP_SA: ${{ vars.GCP_EPHEMERAL_SA }}
+        run: |
+          if { [ "$CLOUD" = aws ] && [ -n "$AWS_ROLE" ]; } || { [ "$CLOUD" = gcp ] && [ -n "$GCP_SA" ]; }; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No CI identity for $CLOUD yet (infra/live/global/00-ci-identity); nothing reaped there. Use 'make reap' meanwhile."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: steps.cfg.outputs.ready == 'true' && matrix.cloud == 'aws'
+        with:
+          role-to-assume: ${{ vars.AWS_EPHEMERAL_ROLE }}
+          aws-region: ap-south-1
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: steps.cfg.outputs.ready == 'true' && matrix.cloud == 'gcp'
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_EPHEMERAL_SA }}
+
+      - name: Destroy if expired
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          CLOUD: ${{ matrix.cloud }}
+        run: bash tools/dev/reap-expired.sh "$CLOUD"
 ```
-(The last step is shown as an echo for brevity; reuse the credential steps from `_terraform-stack.yml`. Only `*-dev` stacks carry `cb-expires-at`; prod never does.)
+
+```bash
+# tools/dev/reap-expired.sh
+#!/usr/bin/env bash
+# Destroy ephemeral cells whose TTL has passed. One implementation for `make reap` (laptop) and
+# ttl-reaper.yml (hourly): the expiry is read from each stack's own state (output expires_at), so
+# both clouds work the same way and nothing depends on tag-search APIs.
+#   bash tools/dev/reap-expired.sh aws gcp      # needs credentials for the clouds named
+# Only *-dev stacks are ever considered; prod has no expiry and the facade refuses to give it one.
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+now=$(date -u +%s)
+status=0
+
+for cloud in "$@"; do
+  case "$cloud" in aws|gcp) ;; *) echo "skip unknown cloud: $cloud"; continue ;; esac
+  stack="$REPO/infra/live/$cloud-dev/10-foundation"
+  echo "== $cloud-dev"
+  if ! terraform -chdir="$stack" init -input=false -no-color -lockfile=readonly >/dev/null; then
+    echo "   init failed (credentials or state bucket?)"; status=1; continue
+  fi
+  expires=$(terraform -chdir="$stack" output -json 2>/dev/null | jq -r '.expires_at.value // empty')
+  if [ -z "$expires" ]; then
+    echo "   nothing deployed"; continue
+  fi
+  if [ "$expires" -gt "$now" ]; then
+    echo "   alive for another $(( (expires - now) / 60 )) min (expires $(date -u -d "@$expires" +%FT%TZ))"; continue
+  fi
+  echo "   expired $(( (now - expires) / 60 )) min ago: destroying"
+  # Destroy needs the stack's required variables; their values don't matter for a destroy plan.
+  if TF_VAR_expires_at="$expires" TF_VAR_admin_cidrs='["192.0.2.1/32"]' \
+       terraform -chdir="$stack" plan -destroy -input=false -no-color -lock-timeout=5m -out=reap.tfplan >/dev/null \
+     && terraform -chdir="$stack" apply -input=false -no-color reap.tfplan; then
+    echo "   destroyed"
+  else
+    echo "   DESTROY FAILED: the cell is still running and billing"; status=1
+  fi
+  rm -f "$stack/reap.tfplan"
+done
+exit $status
+```
+
+```yaml
+# .github/workflows/ephemeral-up.yml
+# Bring up an ephemeral managed cell (EKS or GKE) for a demo, at most 8 hours; ttl-reaper.yml
+# destroys it after cb-expires-at. Same stack and same TTL rule as `make managed-up` on a laptop.
+# Setup (once): apply infra/live/global/00-ci-identity, then in Settings → Environments create
+# "ephemeral" (no required reviewers, deployment branches: main) with variables AWS_EPHEMERAL_ROLE,
+# GCP_WIF_PROVIDER, GCP_EPHEMERAL_SA from that stack's outputs.
+name: ephemeral-up
+
+on:
+  workflow_dispatch:
+    inputs:
+      cloud:
+        description: Which cloud
+        type: choice
+        options: [gcp, aws]
+        default: gcp
+      ttl_hours:
+        description: Lifetime in hours (1-8)
+        type: choice
+        options: ["1", "2", "3", "4", "5", "6", "7", "8"]
+        default: "4"
+      admin_cidr:
+        description: Your public IP as a CIDR (e.g. 203.0.113.10/32); the only address the API admits
+        type: string
+        required: true
+      admin_arn:
+        description: "AWS only: your IAM ARN, granted cluster-admin (optional)"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ephemeral-${{ inputs.cloud }} # never two applies (or an apply and a reap) on one stack
+  cancel-in-progress: false
+
+jobs:
+  up:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ephemeral
+    permissions:
+      contents: read
+      id-token: write # OIDC to AWS / GCP; no stored cloud keys
+    env:
+      CLOUD: ${{ inputs.cloud }}
+      STACK: infra/live/${{ inputs.cloud }}-dev/10-foundation
+    steps:
+      - name: Refuse a world-open or malformed API allowlist
+        env:
+          ADMIN_CIDR: ${{ inputs.admin_cidr }}
+        run: |
+          if ! [[ "$ADMIN_CIDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/(2[4-9]|3[0-2])$ ]]; then
+            echo "::error::admin_cidr must be one IPv4 address or a small range (/24 to /32)"; exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: inputs.cloud == 'aws'
+        with:
+          role-to-assume: ${{ vars.AWS_EPHEMERAL_ROLE }}
+          aws-region: ap-south-1
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: inputs.cloud == 'gcp'
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_EPHEMERAL_SA }}
+
+      - name: Plan and apply with a TTL
+        env:
+          TTL_HOURS: ${{ inputs.ttl_hours }}
+          ADMIN_CIDR: ${{ inputs.admin_cidr }}
+          ADMIN_ARN: ${{ inputs.admin_arn }}
+          CI_ROLE: ${{ vars.AWS_EPHEMERAL_ROLE }}
+          DOCKERHUB_USER: ${{ vars.DOCKERHUB_USER }}
+        run: |
+          expires=$(( $(date -u +%s) + TTL_HOURS * 3600 ))
+          export TF_VAR_expires_at="$expires" TF_VAR_admin_cidrs="[\"$ADMIN_CIDR\"]"
+          if [ "$CLOUD" = aws ]; then
+            arns=$(jq -nc --arg ci "$CI_ROLE" --arg me "$ADMIN_ARN" '[$ci, $me] | map(select(. != ""))')
+            export TF_VAR_admin_principal_arns="$arns"
+          elif [ -n "$DOCKERHUB_USER" ]; then
+            export TF_VAR_dockerhub_user="$DOCKERHUB_USER"
+          fi
+          terraform -chdir="$STACK" init -input=false -lockfile=readonly
+          terraform -chdir="$STACK" plan -input=false -lock-timeout=5m -out=tfplan
+          terraform -chdir="$STACK" apply -input=false tfplan
+          {
+            echo "### $CLOUD-dev is up"
+            echo "Expires **$(date -u -d "@$expires" +%FT%TZ)** (reaped by ttl-reaper within the following hour)."
+            echo
+            echo "From the allowed address: \`make -C infra managed-check CLOUD=$CLOUD\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+```
 
 ## 7. tools/affected_stacks.py
 

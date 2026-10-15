@@ -1932,6 +1932,187 @@ run "aws_budget_cell_plans_offline" {
 
 The AWS k3s module also creates the **SSM transfer bucket** Ansible's `aws_ssm` connection needs (`cluster.auth.transfer_bucket`); the reference had pointed at a bucket nothing created.
 
+## 7c. Ephemeral managed cells, guards and registry mirrors (Week 3)
+
+Validated on Terraform 1.15 (contract test 14/14; dev and CI-identity stack tests), OpenTofu in CI. The facade's guard block, the two registry-mirror implementations and an ephemeral stack:
+
+```hcl
+# infra/modules/cell/main.tf (excerpt)
+locals {
+  name = "cb-${var.cloud}-${var.env}"
+  labels = merge({
+    "cb-cell"    = local.name
+    "cb-cloud"   = var.cloud
+    "cb-env"     = var.env
+    "managed-by" = "terraform"
+    }, var.expires_at == null ? {} : {
+    "cb-expires-at" = var.expires_at # digits only: a valid AWS tag and GCP label value alike
+  })
+  managed      = var.profile == "managed"
+  managed_data = local.managed && var.managed_data
+}
+
+# Cross-variable rules, as preconditions so they hold on Terraform and OpenTofu alike and a test
+# can expect the failure (expect_failures = [terraform_data.guards]).
+resource "terraform_data" "guards" {
+  lifecycle {
+    precondition {
+      condition     = !local.managed || (length(var.admin_cidrs) > 0 && !contains(var.admin_cidrs, "0.0.0.0/0"))
+      error_message = "A managed cell's API endpoint needs admin_cidrs: at least one, and never 0.0.0.0/0."
+    }
+    precondition {
+      condition     = local.managed || length(var.cloudflare_ipv4) > 0
+      error_message = "A budget cell needs cloudflare_ipv4: its firewall admits 443 only from those ranges."
+    }
+    precondition {
+      condition     = var.expires_at == null || var.env != "prod"
+      error_message = "Prod cells never expire: cb-expires-at is for ephemeral cells only."
+    }
+    precondition {
+      condition     = !local.managed || var.expires_at == null || !var.managed_data
+      error_message = "An expiring cell can't own managed data services: they carry prevent_destroy, so the reaper could never destroy it. Set managed_data = false."
+    }
+  }
+}
+```
+
+```hcl
+# infra/modules/registry-mirror/aws-ecr-ptc/main.tf
+# ECR pull-through cache for Docker Hub: nodes pull <acct>.dkr.ecr.<region>.amazonaws.com/dockerhub/
+# <user>/cb-<svc>@sha256:…, ECR fetches it from Docker Hub once and serves it from the region after.
+# Rate limits and a Docker Hub outage leave the pod-start path during an evacuation scale-up.
+
+variable "region" {
+  type = string
+}
+
+variable "credentials_secret" {
+  type        = string
+  description = "Secrets Manager secret holding {\"username\": …, \"accessToken\": …}; ECR requires the ecr-pullthroughcache/ name prefix."
+  validation {
+    condition     = startswith(var.credentials_secret, "ecr-pullthroughcache/")
+    error_message = "ECR only reads upstream credentials from secrets named ecr-pullthroughcache/…"
+  }
+}
+
+data "aws_caller_identity" "this" {}
+
+# Created by the operator (docs/runbooks/week-2-go-live.md): the token never passes through state.
+data "aws_secretsmanager_secret" "dockerhub" {
+  name = var.credentials_secret
+}
+
+resource "aws_ecr_pull_through_cache_rule" "dockerhub" {
+  ecr_repository_prefix = "dockerhub"
+  upstream_registry_url = "registry-1.docker.io"
+  credential_arn        = data.aws_secretsmanager_secret.dockerhub.arn
+}
+
+output "prefix" {
+  value = "${data.aws_caller_identity.this.account_id}.dkr.ecr.${var.region}.amazonaws.com/${aws_ecr_pull_through_cache_rule.dockerhub.ecr_repository_prefix}"
+}
+```
+
+```hcl
+# infra/modules/registry-mirror/gcp-ar-remote/main.tf
+# Artifact Registry remote repository for Docker Hub: nodes pull <region>-docker.pkg.dev/<project>/
+# dockerhub/<user>/cb-<svc>@sha256:…; the node service account already has artifactregistry.reader.
+
+variable "project_id" {
+  type = string
+}
+
+variable "region" {
+  type = string
+}
+
+variable "dockerhub_user" {
+  type        = string
+  default     = null
+  description = "Docker ID for authenticated upstream pulls (token = latest version of secret cb-dockerhub-pull). Null = anonymous, rate-limited."
+}
+
+variable "labels" {
+  type = map(string)
+}
+
+data "google_project" "this" {
+  project_id = var.project_id
+}
+
+data "google_secret_manager_secret" "dockerhub" {
+  count     = var.dockerhub_user == null ? 0 : 1
+  project   = var.project_id
+  secret_id = "cb-dockerhub-pull"
+}
+
+# The Artifact Registry service agent reads the upstream token.
+resource "google_secret_manager_secret_iam_member" "ar_reads_token" {
+  count     = var.dockerhub_user == null ? 0 : 1
+  project   = var.project_id
+  secret_id = data.google_secret_manager_secret.dockerhub[0].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:service-${data.google_project.this.number}@gcp-sa-artifactregistry.iam.gserviceaccount.com"
+}
+
+resource "google_artifact_registry_repository" "dockerhub" {
+  project       = var.project_id
+  location      = var.region
+  repository_id = "dockerhub"
+  format        = "DOCKER"
+  mode          = "REMOTE_REPOSITORY"
+  description   = "Docker Hub pull-through for CloudBridge images"
+  labels        = var.labels
+
+  remote_repository_config {
+    description = "Docker Hub"
+    docker_repository {
+      public_repository = "DOCKER_HUB"
+    }
+    dynamic "upstream_credentials" {
+      for_each = var.dockerhub_user == null ? [] : [1]
+      content {
+        username_password_credentials {
+          username                = var.dockerhub_user
+          password_secret_version = "${data.google_secret_manager_secret.dockerhub[0].id}/versions/latest"
+        }
+      }
+    }
+  }
+
+  depends_on = [google_secret_manager_secret_iam_member.ar_reads_token]
+}
+
+output "prefix" {
+  value = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.dockerhub.repository_id}"
+}
+```
+
+```hcl
+# infra/live/gcp-dev/10-foundation/main.tf
+module "cell" {
+  source               = "../../../modules/cell"
+  cloud                = var.cloud
+  profile              = var.profile
+  env                  = var.env
+  region               = var.region
+  shape                = var.shape
+  node_count           = var.node_count
+  node_max             = var.node_max
+  gcp_project_id       = var.gcp_project_id
+  admin_cidrs          = var.admin_cidrs
+  admin_principal_arns = var.admin_principal_arns
+  dockerhub_user       = var.dockerhub_user
+  expires_at           = var.expires_at
+  # Ephemeral: Postgres and Valkey run in-cluster. Managed data services carry prevent_destroy and
+  # would make the cell impossible to reap (the facade refuses that combination).
+  managed_data  = false
+  managed_cache = false
+}
+```
+
+Mock lessons added in Week 3: `aws_secretsmanager_secret.arn` and `aws_caller_identity.account_id` need realistic defaults (ECR validates the credential ARN); `google_project.number` likewise; a GCP project ID must match Google's format even in tests (the `REPLACE-ME` tfvars placeholder fails on purpose), so stack tests override `gcp_project_id`.
+
 ## 8. Budget-profile bootstrap
 
 Managed cells: `20-bootstrap` installs Argo CD with one `helm_release` and applies the rendered root ApplicationSet.
