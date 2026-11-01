@@ -84,6 +84,14 @@ Whole system on a laptop: three services, Postgres 18, Valkey 9, control-plane A
 
 One Argo CD per cell, each pulling from Git. A hub Argo CD would need cluster-admin credentials for both clouds and become a cross-cloud single point of failure. The cross-cell view comes from the parity checker, not from a hub.
 
+## Local twin (no cloud account)
+
+`tools/dev/twin.sh up` runs `cb-aws-local` and `cb-gcp-local`: two k3s v1.36 containers built by the budget roles (`ansible/playbooks/twin.yml` → `cell_secrets`, `origin_tls`, `argocd_autodeploy`, plus the `k3s_server` config template), each with its own Argo CD following the same ApplicationSet, charts and ring files. A Traefik edge reproduces the Cloudflare LB from `terraform.tfvars.json` (pool weights, `__cflb` cookie, `/healthz/cell` monitor, fallback cell, Full strict). Rules:
+- `gitops/cells/cb-<cloud>-local/values.yaml` stays identical to `cb-<cloud>-budget` except `cell` and `secretStore`; otherwise the twin proves nothing about the budget cell.
+- Argo CD in the twin follows a snapshot of the working tree (`twin` branch on the twin's git server), so chart and values changes are tested before a push; `twin.sh sync` republishes.
+- Cells run the ring files' signed digests. Unreleased service code is tested with `docker-compose.yml`, not the twin.
+- It proves runtime behaviour (sync, NetworkPolicies, Pod Security, routing, affinity, failover), never cloud APIs, Cloudflare's provider schema or real failover timing (the edge monitor runs every 10 s, not 60 s). Runbook: `docs/runbooks/local-twin.md`.
+
 ## When asked to…
 
 | Request | Do |
@@ -91,6 +99,7 @@ One Argo CD per cell, each pulling from Git. A hub Argo CD would need cluster-ad
 | "Deploy to prod" | Merge the ring PRs; never `kubectl apply` or `helm upgrade` by hand |
 | "Hotfix only AWS" / "helm upgrade by hand" | Push back twice: a manual `helm upgrade` creates a second owner that Argo will revert (or fight), and a hotfix on one cloud is a **cross-cloud parity divergence** the nightly parity check will fail on. If truly urgent: ring-main PR + a parity exception with an expiry |
 | "Use :latest" | No — digests only |
+| "Test this chart change without a cloud" | `bash tools/dev/twin.sh sync`, then `twin.sh check`; add the same change to both `cb-*-local` and `cb-*-budget` values if it is per-cell |
 | "Add a service" | New chart from the template, add to ApplicationSet list generator, add to `bump_ring.py`, add to parity `images.digests`, add capacity entry |
 | "Speed up the pipeline" | Cache Maven via setup-java, buildx GHA cache, keep matrix per service |
 

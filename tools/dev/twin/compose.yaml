@@ -1,0 +1,101 @@
+# CloudBridge local twin: two k3s cells behind a Cloudflare-like edge. Driven by tools/dev/twin.sh,
+# which renders everything under TWIN_DIR first (k3s config, Secrets, Argo CD bootstrap, edge config,
+# certificates); don't `docker compose up` this file by hand.
+name: cb-twin
+
+x-cell: &cell
+  image: rancher/k3s:v1.36.5-k3s1          # = k3s_server_version (budget VMs)
+  command: [server]
+  privileged: true                         # k3s runs containerd, iptables and the policy controller
+  tmpfs: [/run, /var/run]
+  restart: unless-stopped
+  mem_limit: ${CB_TWIN_CELL_MEM:-3g}       # a budget VM has 2 GiB; headroom for k3s-in-Docker
+  depends_on: [twin-mirror, twin-git]
+
+services:
+  cell-aws:
+    <<: *cell
+    hostname: cb-aws-local
+    volumes:
+      - cell-aws:/var/lib/rancher/k3s
+      - ${TWIN_DIR}/cb-aws-local/etc:/etc/rancher/k3s/twin:ro
+      - ${TWIN_DIR}/cb-aws-local/manifests:/var/lib/rancher/k3s/server/manifests/cloudbridge:ro
+    environment:
+      K3S_CONFIG_FILE: /etc/rancher/k3s/twin/config.yaml   # names registries.yaml too (twin.yml)
+    networks: [twin]
+
+  cell-gcp:
+    <<: *cell
+    hostname: cb-gcp-local
+    volumes:
+      - cell-gcp:/var/lib/rancher/k3s
+      - ${TWIN_DIR}/cb-gcp-local/etc:/etc/rancher/k3s/twin:ro
+      - ${TWIN_DIR}/cb-gcp-local/manifests:/var/lib/rancher/k3s/server/manifests/cloudbridge:ro
+    environment:
+      K3S_CONFIG_FILE: /etc/rancher/k3s/twin/config.yaml
+    networks: [twin]
+
+  # Stands in for the Cloudflare load balancer. Config: tools/dev/twin/edge_config.py.
+  edge:
+    image: traefik:v3.7.14
+    command:
+      - --entryPoints.websecure.address=:8443
+      - --providers.file.directory=/dynamic
+      - --providers.file.watch=true
+      - --ping=true
+      - --accessLog=true
+      - --accessLog.fields.headers.names.X-CB-Cell=keep
+    ports: ["127.0.0.1:${CB_TWIN_EDGE_PORT:-8443}:8443"]
+    volumes:
+      - ${TWIN_DIR}/edge:/dynamic:ro
+      - ${TWIN_DIR}/pki:/pki:ro
+    restart: unless-stopped
+    networks: [twin]
+
+  # Argo CD in both cells follows a snapshot of this working tree (branch "twin"), so changes are
+  # tested before they're pushed, and a private GitHub repo needs no token here. Smart HTTP, because
+  # Argo CD's go-git client doesn't speak the dumb protocol. Pods reach it by IP: k3s CoreDNS
+  # forwards to public resolvers, not Docker's embedded DNS.
+  twin-git:
+    build:
+      dockerfile_inline: |
+        FROM alpine:3.22
+        RUN apk add --no-cache git git-daemon lighttpd
+        RUN printf '%s\n' \
+          'server.document-root = "/srv"' \
+          'server.port = 80' \
+          'server.modules = ("mod_alias", "mod_cgi", "mod_setenv")' \
+          'alias.url = ("/git" => "/usr/libexec/git-core/git-http-backend")' \
+          'cgi.assign = ("" => "")' \
+          'setenv.add-environment = ("GIT_PROJECT_ROOT" => "/srv/git", "GIT_HTTP_EXPORT_ALL" => "1", "GIT_CONFIG_COUNT" => "1", "GIT_CONFIG_KEY_0" => "safe.directory", "GIT_CONFIG_VALUE_0" => "*")' \
+          > /etc/lighttpd/twin.conf
+        CMD ["lighttpd", "-D", "-f", "/etc/lighttpd/twin.conf"]
+    image: cloudbridge/twin-git:local
+    volumes:
+      - ${TWIN_DIR}/git:/srv/git:ro
+    restart: unless-stopped
+    networks:
+      twin:
+        ipv4_address: ${CB_TWIN_NET:-172.29.80}.6
+
+  # One Docker Hub pull per image for both cells (the registries_mirror role's job on the VMs).
+  twin-mirror:
+    image: registry:3.0.0
+    environment:
+      REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
+      REGISTRY_LOG_LEVEL: info
+    volumes:
+      - mirror:/var/lib/registry
+    restart: unless-stopped
+    networks: [twin]
+
+networks:
+  twin:
+    ipam:
+      config:
+        - subnet: ${CB_TWIN_NET:-172.29.80}.0/24
+
+volumes:
+  cell-aws:
+  cell-gcp:
+  mirror:
