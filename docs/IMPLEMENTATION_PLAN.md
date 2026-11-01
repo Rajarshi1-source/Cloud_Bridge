@@ -398,6 +398,14 @@ The order follows Rev 2 §4.3 and ships first: **a public multi-cloud link by th
 - `ephemeral-up.yml` + `ttl-reaper.yml` (`cb-expires-at`, at most 8 h).
 - **Done when:** `make managed-up CLOUD=gcp` yields a healthy cluster that gets reaped after its TTL.
 
+### Between Weeks 3 and 4: local two-cell twin (gitops-delivery, ansible-ops)
+
+> **Status (1 Nov 2026): runs end to end** on branch `local-twin`, at $0 and with no cloud account. Runbook: [local-twin.md](runbooks/local-twin.md).
+> - **What it is:** `tools/dev/twin.sh` runs `cb-aws-local` and `cb-gcp-local` (k3s v1.36 containers) built by the budget roles via `ansible/playbooks/twin.yml`. A Traefik edge, generated from `terraform.tfvars.json` by `tools/dev/twin/edge_config.py`, reproduces the Cloudflare LB's weights, cookie, monitor, fallback and Full strict. Argo CD follows a snapshot of the working tree.
+> - **Measured:** a 70/30 split (140/60 of 200), cookie affinity, and the API smoke tests pass. Failover took 18 s with AWS down and 14 s with GCP down; each cell was back 1 s after it returned.
+> - **Found:** the root ApplicationSet needs `ServerSideDiff=true`, which is fixed for all cells.
+> - **Why now:** Weeks 4–8 (allocator across two cells, parity checker, Prometheus/Grafana, drills, Rollouts) can be built against it before the real go-live. Cloud APIs, Cloudflare's API and Access, and real failover timing still need the clouds.
+
 ### Week 4: Data and cells (terraform-cells, cell-services)
 
 - `database/{aws-rds,gcp-cloudsql}` (PG 18, `prevent_destroy`, `random_password` → secret store, `secret_ref` output).

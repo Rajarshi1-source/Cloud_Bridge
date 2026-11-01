@@ -178,6 +178,11 @@ spec:
       name: "{{.app}}"
       labels:
         cb-cell: ${cell}
+      # Compare only the fields Argo CD applies (server-side). The default client-side diff marks
+      # Rollouts OutOfSync forever (the HPA owns spec.replicas through the scale subresource) and the
+      # postgres StatefulSet too (the API server fills in volumeClaimTemplates). Found by the twin.
+      annotations:
+        argocd.argoproj.io/compare-options: ServerSideDiff=true
     spec:
       project: default
       sources:

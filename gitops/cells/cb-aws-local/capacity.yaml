@@ -1,0 +1,10 @@
+# Per-pod RPS at p95 < 300 ms and errors < 0.5%, measured with k6 against this cell (Week 5).
+# Not measured yet: the capacity check refuses to evacuate into a cell whose numbers are 0.
+measuredAt: null
+perPodRps:
+  api-gateway: 0
+  order-service: 0
+  inventory-service: 0
+fanout:                   # downstream calls per gateway request
+  order-service: 1
+  inventory-service: 2

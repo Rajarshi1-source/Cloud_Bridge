@@ -1,0 +1,73 @@
+---
+# Renders one local twin cell (tools/dev/twin.sh) with the roles the budget VMs run, so the twin
+# exercises the same k3s config, Secrets, origin certificate and Argo CD bootstrap. Only the
+# cloud-only parts are swapped: no VM hardening or node_exporter, generated secrets instead of the
+# clouds' secret managers, a pull-through mirror instead of the Docker Hub token, and Argo CD
+# follows the twin's git server (a snapshot of this working tree) instead of GitHub.
+# Runs on localhost against a directory that twin.sh mounts into the k3s container:
+#   ansible-playbook -i localhost, -c local playbooks/twin.yml -e cb_cell=cb-aws-local -e cb_cloud=aws \
+#     -e cb_ring=ring-main -e twin_dir=/twin/cb-aws-local -e twin_pki=/twin/pki \
+#     -e twin_git_url=http://172.29.80.6/git/cloud_bridge.git
+- name: Render a local twin cell
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../roles/k3s_server/defaults/main.yml
+  vars:
+    cb_origin_ip: 127.0.0.1
+    cb_k3s_manifests_dir: "{{ twin_dir }}/manifests"
+    cell_secrets_dir: "{{ twin_dir }}/state"
+    twin_revision: twin
+    twin_mirror_url: http://twin-mirror:5000
+    origin_tls_pair:
+      certificate: "{{ lookup('ansible.builtin.file', twin_pki ~ '/origin.crt') }}"
+      private_key: "{{ lookup('ansible.builtin.file', twin_pki ~ '/origin.key') }}"
+  pre_tasks:
+    - name: Create the twin's k3s config directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ twin_dir }}/etc"
+        - "{{ twin_dir }}/etc/config.yaml.d"
+
+    - name: Write the k3s config from the k3s_server role's own template
+      ansible.builtin.template:
+        src: ../roles/k3s_server/templates/config.yaml.j2
+        dest: "{{ twin_dir }}/etc/config.yaml"
+        mode: "0600"
+
+    # A drop-in next to the role's config (k3s merges config.yaml.d/*.yaml), so the role's
+    # template stays untouched and re-runs report no change.
+    - name: Tell k3s where the twin's registries.yaml is (the config lives in a mounted directory)
+      ansible.builtin.copy:
+        dest: "{{ twin_dir }}/etc/config.yaml.d/10-twin.yaml"
+        mode: "0600"
+        content: |
+          private-registry: "/etc/rancher/k3s/twin/registries.yaml"
+
+    # Stands in for the registries_mirror role: every docker.io pull of both cells goes through one
+    # cache, so a twin start costs each image one Docker Hub pull instead of one per cell.
+    - name: Send docker.io pulls through the twin's pull-through mirror
+      ansible.builtin.copy:
+        dest: "{{ twin_dir }}/etc/registries.yaml"
+        mode: "0600"
+        content: |
+          mirrors:
+            docker.io:
+              endpoint:
+                - {{ twin_mirror_url | to_json }}
+  roles:
+    - cell_secrets
+    - origin_tls
+    - argocd_autodeploy
+  post_tasks:
+    - name: Point the root ApplicationSet at the twin's git server and snapshot branch
+      ansible.builtin.replace:
+        path: "{{ cb_k3s_manifests_dir }}/20-root-appset.yaml"
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - { regexp: 'repoURL: https://github\.com/\S+', replace: "repoURL: {{ twin_git_url }}" }
+        - { regexp: 'targetRevision: main', replace: "targetRevision: {{ twin_revision }}" }
