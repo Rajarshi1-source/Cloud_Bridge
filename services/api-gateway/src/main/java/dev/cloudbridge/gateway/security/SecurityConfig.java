@@ -48,7 +48,7 @@ class SecurityConfig {
 			.oauth2ResourceServer((o) -> o.bearerTokenResolver(resolver)
 				.jwt((j) -> j.decoder(decoder).jwtAuthenticationConverter(converter)))
 			.sessionManagement((s) -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-			.csrf((c) -> c.disable()) // stateless, header-authenticated, no cookies
+			.csrf((c) -> c.ignoringRequestMatchers(PATHS.matcher("/admin/**"))) // header-authenticated, no cookies
 			.cors((c) -> c.disable()); // no browser ever calls the admin API
 		return http.build();
 	}
@@ -75,7 +75,7 @@ class SecurityConfig {
 				.authenticationEntryPoint((req, res, ex) -> res.sendError(HttpServletResponse.SC_NOT_FOUND))
 				.accessDeniedHandler((req, res, ex) -> res.sendError(HttpServletResponse.SC_NOT_FOUND)))
 			.sessionManagement((s) -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-			.csrf((c) -> c.disable()) // stateless JSON API; no cookie-based auth
+			.csrf((c) -> c.ignoringRequestMatchers(PATHS.matcher(HttpMethod.POST, "/orders"))) // no cookie-based auth
 			.cors(Customizer.withDefaults()) // CorsConfigurationSource bean in CorsConfig
 			.headers((h) -> h.contentTypeOptions(Customizer.withDefaults()));
 		return http.build();

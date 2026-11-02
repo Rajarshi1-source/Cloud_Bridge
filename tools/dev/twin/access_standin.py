@@ -114,9 +114,11 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("X-Forwarded-Host", "").split(":")[0]
         client_id = self.headers.get("CF-Access-Client-Id", "")
         secret = self.headers.get("CF-Access-Client-Secret", "")
-        expected = service_tokens().get(client_id)
-        if host in ADMIN_HOSTS and expected and hmac.compare_digest(expected, secret):
-            self.answer(200, headers={"Cf-Access-Jwt-Assertion": sign(client_id)})
+        # The JWT names the id from the token file, so nothing from the request reaches a response header.
+        known = next((k for k, expected in service_tokens().items()
+                      if k == client_id and hmac.compare_digest(expected, secret)), None)
+        if host in ADMIN_HOSTS and known:
+            self.answer(200, headers={"Cf-Access-Jwt-Assertion": sign(known)})
         else:
             self.answer(403, b"Forbidden by Access\n", {"Content-Type": "text/plain"})
 
