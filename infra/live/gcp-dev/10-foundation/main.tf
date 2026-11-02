@@ -12,6 +12,7 @@ module "cell" {
   admin_principal_arns = var.admin_principal_arns
   dockerhub_user       = var.dockerhub_user
   expires_at           = var.expires_at
+  admin_access         = var.admin_access
   # Ephemeral: Postgres and Valkey run in-cluster. Managed data services carry prevent_destroy and
   # would make the cell impossible to reap (the facade refuses that combination).
   managed_data  = false

@@ -2,3 +2,8 @@
 cell_secrets_dir: /var/lib/cloudbridge
 cell_secrets_db_user: cell
 cell_secrets_db_name: cell
+# Cloudflare Access values the origin checks the admin JWT against (outputs of global/30-traffic).
+# Not secrets, but there is no sensible default: the role fails rather than render an open admin API.
+cell_secrets_access_team_domain: "{{ lookup('ansible.builtin.env', 'CF_ACCESS_TEAM_DOMAIN') }}"
+cell_secrets_access_aud: "{{ lookup('ansible.builtin.env', 'CF_ACCESS_AUD') }}"
+cell_secrets_access_allowed_client_ids: "{{ lookup('ansible.builtin.env', 'CF_ACCESS_ALLOWED_CLIENT_IDS') }}"

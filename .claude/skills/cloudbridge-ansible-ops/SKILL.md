@@ -53,7 +53,7 @@ These differ, so they live in `group_vars/cloud_aws.yml` and `group_vars/cloud_g
 | `base_hardening` | SSH password auth off, unattended security upgrades, auditd, chrony, sysctl hardening, 1 GiB swapfile with `vm.swappiness=10` (2 GiB VMs + JVM start bursts), journald cap | Templates + `notify` handlers |
 | `k3s_server` | Pinned k3s install via the official script with `INSTALL_K3S_VERSION`, config file (`disable: [traefik]` because Traefik is Argo-managed, kubelet reservations, eviction thresholds), wait for Ready | Install only when `k3s --version` doesn't contain the pin |
 | `registries_mirror` | `/etc/rancher/k3s/registries.yaml` with authenticated Docker Hub endpoint | Restarts k3s only on change |
-| `cell_secrets` | `cb-app` namespace (restricted Pod Security) + `cell-db` / `cell-cache` Secrets in the auto-deploy dir; the DB password is generated once on the VM (budget Postgres lives on that disk) | `copy force: false`; `no_log: true` |
+| `cell_secrets` | `cb-app` namespace (restricted Pod Security) + `cell-db` / `cell-cache` / `cell-admin` Secrets (the last from `CF_ACCESS_*`, the role fails without them) in the auto-deploy dir; the DB password is generated once on the VM (budget Postgres lives on that disk) | `copy force: false`; `no_log: true` |
 | `origin_tls` | Cloudflare Origin CA cert + key (`global/20-origin-tls`) from the cloud secret store into a `kubernetes.io/tls` Secret manifest in the auto-deploy dir | `no_log: true` |
 | `node_exporter` | Pinned binary + systemd unit | Version-checked |
 | `argocd_autodeploy` | Renders HelmChart CR (`argo-cd` chart 10.10.5, slimmed for 2 GiB) + root ApplicationSet with `cell` and `ring` (`cb_ring` from `group_vars/cloud_*`) filled | Files only; k3s reconciles |

@@ -199,3 +199,43 @@ locals {
   database = one(concat(module.db_aws[*].database, module.db_gcp[*].database))
   cache    = one(concat(module.cache_aws[*].cache, module.cache_gcp[*].cache))
 }
+
+# ---------- secret store (managed profile; budget cells get their Secrets from Ansible) ----------
+locals {
+  # Everything the cell's ExternalSecrets need besides passwords. Null data outputs mean Postgres and
+  # Valkey run in the cluster. Empty Access values make the services refuse to start (fail closed).
+  cell_config = {
+    jdbcUrl = (local.database == null ? "jdbc:postgresql://postgres.cb-app.svc:5432/cell"
+    : "jdbc:postgresql://${local.database.host}:${local.database.port}/cell")
+    cacheUrl = (local.cache == null ? "redis://valkey.cb-app.svc:6379"
+    : "rediss://${coalesce(local.cache.host, "read-after-first-apply")}:${local.cache.port}")
+    accessTeamDomain = try(var.admin_access.team_domain, "")
+    accessAudience   = try(var.admin_access.audience, "")
+    allowedClientIds = try(var.admin_access.allowed_client_ids, "")
+  }
+}
+
+module "secret_store_aws" {
+  source        = "../secret-store/aws"
+  count         = var.cloud == "aws" && local.managed ? 1 : 0
+  name          = local.name
+  cluster_name  = local.cluster.name
+  region        = var.region
+  config        = local.cell_config
+  in_cluster_db = !local.managed_data
+  tags          = local.labels
+}
+
+module "secret_store_gcp" {
+  source        = "../secret-store/gcp"
+  count         = var.cloud == "gcp" && local.managed ? 1 : 0
+  name          = local.name
+  project_id    = var.gcp_project_id
+  config        = local.cell_config
+  in_cluster_db = !local.managed_data
+  labels        = local.labels
+}
+
+locals {
+  secret_store = one(concat(module.secret_store_aws[*].secret_store, module.secret_store_gcp[*].secret_store))
+}

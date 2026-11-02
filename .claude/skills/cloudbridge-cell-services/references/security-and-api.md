@@ -107,7 +107,8 @@ Auth stops strangers. Bounds stop a buggy or compromised allocator from doing un
 | Quantity cap | `0 ≤ remainingQty ≤ max_cell_grant` (`products.max_cell_grant`, else `default-max-cell-grant`) | `OUT_OF_BOUNDS` / 422 | Bounds the damage of any single grant |
 | Replay | same `(sku, epoch)` already `APPLIED` with the same quantity and expiry | `REPLAYED` / 200 `{replayed: true}` | Allocator retries after a timeout are safe |
 | Epoch reuse | same `(sku, epoch)` already applied with a **different** grant | `EPOCH_REUSED` / 409 `stale-lease-epoch` | One epoch, one grant |
-| Apply | I4 upsert (`granted_qty = remaining + sold_qty`) | `APPLIED` / 200 | |
+| Reported sold | `0 ≤ reportedSold ≤ current granted_qty` | `OUT_OF_BOUNDS` / 422 rule `reported-sold` | A cell can't have sold more than it was ever granted, so a larger figure didn't come from its report |
+| Apply | I4 upsert (`granted_qty = GREATEST(sold_qty, reportedSold + remainingQty)`) | `APPLIED` / 200 `{epoch, grantedQty, replayed}` | Sales after the report come out of the new grant; `grantedQty` tells the allocator what the cell really holds |
 
 Every attempt that passes auth — applied or rejected — is written to `inventory.lease_grant_log` with the caller's `common_name` and the JWT `jti`. Attempts rejected by auth never reach inventory; the gateway counts them in `cb_admin_auth_failures_total{reason}` (alert on any non-zero rate on prod).
 
@@ -717,6 +718,7 @@ CREATE TABLE IF NOT EXISTS inventory.lease_grant_log (
     sku          text        NOT NULL,
     epoch        bigint      NOT NULL,
     granted_qty  int         NOT NULL,                 -- remaining quantity as sent by the allocator
+    reported_sold int        NOT NULL,                 -- the sold_qty that remaining was computed against
     expires_at   timestamptz NOT NULL,
     actor        text        NOT NULL,                 -- Access JWT common_name (service token Client ID)
     jti          text,
@@ -729,163 +731,11 @@ CREATE INDEX IF NOT EXISTS lease_grant_log_applied ON inventory.lease_grant_log 
 CREATE INDEX IF NOT EXISTS lease_grant_log_received ON inventory.lease_grant_log (received_at);   -- 30-day sweep
 ```
 
-```java
-// dev/cloudbridge/inventory/lease/LeaseGrantService.java
-package dev.cloudbridge.inventory.lease;
+The code is in the repo and is the reference: `services/inventory-service/src/main/java/dev/cloudbridge/inventory/lease/{LeaseGrantService,LeaseController}.java`. Provide a `Clock` bean (`Clock.systemUTC()`). What matters when changing it:
 
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.OffsetDateTime;
-
-@Service
-public class LeaseGrantService {
-
-    public record Grant(String sku, int remainingQty, long epoch, OffsetDateTime expiresAt) {}
-    public enum Outcome { APPLIED, REPLAYED, STALE, EPOCH_REUSED, OUT_OF_BOUNDS, UNKNOWN_SKU }
-    public record Result(Outcome outcome, String rule, long epoch) {}
-
-    private final JdbcClient jdbc;
-    private final Clock clock;
-    private final long maxEpochJump;
-    private final Duration maxLeaseTtl;
-    private final int defaultMaxCellGrant;
-
-    LeaseGrantService(JdbcClient jdbc, Clock clock,
-                      @Value("${cloudbridge.lease.max-epoch-jump:1000}") long maxEpochJump,
-                      @Value("${cloudbridge.lease.max-ttl:20m}") Duration maxLeaseTtl,
-                      @Value("${cloudbridge.lease.default-max-cell-grant:10000}") int defaultMaxCellGrant) {
-        this.jdbc = jdbc;
-        this.clock = clock;
-        this.maxEpochJump = maxEpochJump;
-        this.maxLeaseTtl = maxLeaseTtl;
-        this.defaultMaxCellGrant = defaultMaxCellGrant;
-    }
-
-    @Transactional
-    public Result apply(Grant g, String actor, String jti) {
-        Result r = decideAndApply(g);
-        jdbc.sql("""
-                INSERT INTO inventory.lease_grant_log (sku, epoch, granted_qty, expires_at, actor, jti, outcome, rule)
-                VALUES (:sku, :epoch, :qty, :exp, :actor, :jti, :outcome, :rule)""")
-            .param("sku", g.sku()).param("epoch", g.epoch()).param("qty", g.remainingQty())
-            .param("exp", g.expiresAt()).param("actor", actor).param("jti", jti)
-            .param("outcome", r.outcome().name()).param("rule", r.rule())
-            .update();
-        return r;
-    }
-
-    private Result decideAndApply(Grant g) {
-        var cap = jdbc.sql("SELECT coalesce(max_cell_grant, :dflt) FROM inventory.products WHERE sku = :sku")
-            .param("dflt", defaultMaxCellGrant).param("sku", g.sku())
-            .query(Integer.class).optional();
-        if (cap.isEmpty()) return new Result(Outcome.UNKNOWN_SKU, "sku", 0);
-
-        // Lock the lease row so concurrent grants for one SKU serialise.
-        long current = jdbc.sql("SELECT lease_epoch FROM inventory.inventory_lease WHERE sku = :sku FOR UPDATE")
-            .param("sku", g.sku()).query(Long.class).optional().orElse(0L);
-
-        if (g.epoch() == current && current > 0) {
-            boolean same = jdbc.sql("""
-                    SELECT count(*) > 0 FROM inventory.lease_grant_log
-                     WHERE sku = :sku AND epoch = :epoch AND outcome = 'APPLIED'
-                       AND granted_qty = :qty AND expires_at = :exp""")
-                .param("sku", g.sku()).param("epoch", g.epoch()).param("qty", g.remainingQty())
-                .param("exp", g.expiresAt()).query(Boolean.class).single();
-            return new Result(same ? Outcome.REPLAYED : Outcome.EPOCH_REUSED, null, current);
-        }
-        if (g.epoch() < current)                     return new Result(Outcome.STALE, null, current);
-        if (g.epoch() < 1)                           return new Result(Outcome.OUT_OF_BOUNDS, "epoch-positive", current);
-        if (g.epoch() > current + maxEpochJump)      return new Result(Outcome.OUT_OF_BOUNDS, "epoch-jump", current);
-
-        OffsetDateTime now = OffsetDateTime.now(clock);
-        if (!g.expiresAt().isAfter(now) || g.expiresAt().isAfter(now.plus(maxLeaseTtl)))
-            return new Result(Outcome.OUT_OF_BOUNDS, "ttl", current);
-        if (g.remainingQty() < 0 || g.remainingQty() > cap.get())
-            return new Result(Outcome.OUT_OF_BOUNDS, "quantity", current);
-
-        // I4: granted_qty stores a running total (remaining + already sold) so CHECK (sold_qty <= granted_qty)
-        // stays meaningful across renewals without resetting sold_qty (which would lose the audit trail).
-        long applied = jdbc.sql("""
-                INSERT INTO inventory.inventory_lease (sku, granted_qty, sold_qty, lease_epoch, expires_at)
-                VALUES (:sku, :granted, 0, :epoch, :exp)
-                ON CONFLICT (sku) DO UPDATE
-                   SET granted_qty = EXCLUDED.granted_qty + inventory.inventory_lease.sold_qty,
-                       lease_epoch = EXCLUDED.lease_epoch,
-                       expires_at  = EXCLUDED.expires_at,
-                       updated_at  = now()
-                 WHERE inventory.inventory_lease.lease_epoch < EXCLUDED.lease_epoch
-                RETURNING lease_epoch""")
-            .param("sku", g.sku()).param("granted", g.remainingQty())
-            .param("epoch", g.epoch()).param("exp", g.expiresAt())
-            .query(Long.class).single();
-        return new Result(Outcome.APPLIED, null, applied);
-    }
-}
-```
-Provide a `Clock` bean (`Clock.systemUTC()`); tests inject a fixed clock.
-
-```java
-// dev/cloudbridge/inventory/lease/LeaseController.java
-package dev.cloudbridge.inventory.lease;
-
-import dev.cloudbridge.common.Problems;
-import dev.cloudbridge.inventory.lease.LeaseGrantService.Grant;
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
-import org.springframework.web.bind.annotation.*;
-import java.time.OffsetDateTime;
-import java.util.List;
-import java.util.Map;
-
-/** Auth is enforced by the admin SecurityFilterChain (Access JWT + ROLE_LEASE_ALLOCATOR) in gateway AND here. */
-@RestController
-@RequestMapping("/admin/leases")
-class LeaseController {
-    record GrantRequest(@NotBlank String sku, @Min(0) int remainingQty, @Min(1) long epoch,
-                        @NotNull OffsetDateTime expiresAt) {}
-
-    private final LeaseGrantService grants;
-    private final JdbcClient jdbc;
-
-    LeaseController(LeaseGrantService grants, JdbcClient jdbc) { this.grants = grants; this.jdbc = jdbc; }
-
-    @PostMapping("/grant")
-    ResponseEntity<?> grant(@Valid @RequestBody GrantRequest req, JwtAuthenticationToken auth) {
-        var r = grants.apply(new Grant(req.sku(), req.remainingQty(), req.epoch(), req.expiresAt()),
-                             auth.getName(), auth.getToken().getId());
-        return switch (r.outcome()) {
-            case APPLIED      -> ResponseEntity.ok(Map.of("epoch", r.epoch(), "replayed", false));
-            case REPLAYED     -> ResponseEntity.ok(Map.of("epoch", r.epoch(), "replayed", true));
-            case STALE, EPOCH_REUSED -> problem(Problems.STALE_LEASE_EPOCH,
-                                    "current epoch " + r.epoch() + ", received " + req.epoch(), null);
-            case OUT_OF_BOUNDS -> problem(Problems.LEASE_GRANT_OUT_OF_BOUNDS, "rule: " + r.rule(), r.rule());
-            case UNKNOWN_SKU  -> problem(Problems.LEASE_GRANT_OUT_OF_BOUNDS, "unknown sku " + req.sku(), "sku");
-        };
-    }
-
-    @GetMapping("/report")
-    List<Map<String, Object>> report() {
-        return jdbc.sql("SELECT sku, granted_qty, sold_qty, lease_epoch, expires_at FROM inventory.inventory_lease")
-            .query().listOfRows();
-    }
-
-    private static ResponseEntity<?> problem(Problems p, String detail, String rule) {
-        var pd = p.detail(detail);
-        if (rule != null) pd.setProperty("rule", rule);
-        return ResponseEntity.status(p.status).contentType(MediaType.APPLICATION_PROBLEM_JSON).body(pd);
-    }
-}
-```
+- `POST /admin/leases/grant` takes `{sku, remainingQty, reportedSold, epoch, expiresAt}` and answers `{epoch, grantedQty, replayed}`. `GET /admin/leases/report` answers `[{sku, grantedQty, soldQty, leaseEpoch, expiresAt}]`.
+- `reportedSold` and the returned `grantedQty` are what make "never oversell" true across cells (Week 4: a randomized allocator test oversold without them). With I4 as first written (`remaining + current sold_qty`), units sold between report and grant were added on top of the grant. And a cell that sold past a shrunken total keeps those sales, so the allocator must clip the next cell against the answer, not against what it asked for.
+- An empty `RETURNING` (a concurrent first grant won the insert) is `STALE`, not an exception.
 
 ---
 

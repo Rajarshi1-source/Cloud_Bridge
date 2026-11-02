@@ -12,6 +12,7 @@ resources:
 javaToolOptions: "-XX:+UseSerialGC -Xss512k"
 database: true
 cache: true
+adminAuth: true          # validates the Access JWT again behind the gateway; refuses to start without it
 env: {}
 ingress:
   enabled: false

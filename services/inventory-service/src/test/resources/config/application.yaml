@@ -5,3 +5,7 @@ management:
 cloudbridge:
   scheduling:
     enabled: false        # tests drive the reaper / event consumer directly
+  admin:
+    team-domain: https://team.cloudflareaccess.test
+    audience: aud-test
+    allowed-service-tokens: allocator-client-id

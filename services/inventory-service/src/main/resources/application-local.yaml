@@ -1,4 +1,4 @@
-# docker compose / laptop only: seed demo products and a long-lived lease (no allocator locally).
+# docker compose / laptop only: seed a long-lived lease on top of the catalog (no allocator locally).
 spring:
   flyway:
-    locations: classpath:db/migration,classpath:db/seed-local
+    locations: classpath:db/migration,classpath:db/catalog,classpath:db/seed-local

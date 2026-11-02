@@ -1,0 +1,25 @@
+# The ONLY per-cloud app config. Allowed to differ between cells: cell, cloud, ingress class and
+# annotations, imageRegistryMirror, secretStore, network sources, and the replica floors and data of
+# this ephemeral profile. Anything else is parity drift.
+cell: cb-gcp-dev
+cloud: gcp
+imageRegistryMirror: docker.io    # or terraform output cell.image_mirror once the mirror is enabled
+secretStore: external-secrets (from GCP Secret Manager)
+externalSecrets:
+  enabled: true
+  provider: gcp
+  gcpProjectId: cloudbridge-budget-REPLACE-ME   # same project as infra/live/gcp-dev/10-foundation
+  originTlsKey: cb-origin-tls
+ingress:
+  className: gce
+  annotations:
+    kubernetes.io/ingress.global-static-ip-name: cb-gcp-dev-ingress
+    kubernetes.io/ingress.allow-http: "false"
+  serviceAnnotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "api-gateway"}'
+network:
+  ingressCidrs: [35.191.0.0/16, 130.211.0.0/22]   # Google's load balancer and health-check ranges
+# Same replica floors as production charts, in-cluster data (ephemeral: nothing to keep).
+budgetData:
+  enabled: true

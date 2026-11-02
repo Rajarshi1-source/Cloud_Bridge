@@ -11,6 +11,10 @@ addons:
     chartVersion: 2.43.7        # Argo Rollouts v1.10.1
   traefik:
     chartVersion: 41.7.1        # Traefik v3.7.14; installed only where ingress.className is traefik
+  externalSecrets:
+    chartVersion: 2.14.0        # External Secrets v2.14.0; installed only where externalSecrets.enabled
+  awsLoadBalancerController:
+    chartVersion: 3.6.1         # v3.6.1; installed only where ingress.className is alb
 
 ingress:
   className: ""
@@ -30,6 +34,33 @@ network:
   # Managed data services (RDS / Cloud SQL / ElastiCache / Memorystore) live outside the cluster.
   dataCidrs: []
   monitoringNamespace: monitoring
+  # Where the gateway and inventory-service fetch the Cloudflare Access signing keys (HTTPS to
+  # <team>.cloudflareaccess.com, which sits on Cloudflare's published ranges: cloudflare.com/ips).
+  accessCidrs:
+    - 173.245.48.0/20
+    - 103.21.244.0/22
+    - 103.22.200.0/22
+    - 103.31.4.0/22
+    - 141.101.64.0/18
+    - 108.162.192.0/18
+    - 190.93.240.0/20
+    - 188.114.96.0/20
+    - 197.234.240.0/22
+    - 198.41.128.0/17
+    - 162.158.0.0/15
+    - 104.16.0.0/13
+    - 104.24.0.0/14
+    - 172.64.0.0/13
+    - 131.0.72.0/22
+
+# Managed profile: cell-db, cell-cache, cell-admin and origin-tls come from the cloud's secret manager
+# (Terraform writes them, infra/modules/secret-store). Budget cells get them from Ansible instead.
+externalSecrets:
+  enabled: false
+  provider: ""              # aws | gcp
+  region: ""                # aws
+  gcpProjectId: ""          # gcp
+  originTlsKey: ""          # cb/origin-tls on AWS, cb-origin-tls on GCP
 
 # Budget profile only: Postgres and Valkey run in the cluster. Credentials come from the cell-db /
 # cell-cache Secrets that Ansible writes on the VM; Argo CD never sees a password.

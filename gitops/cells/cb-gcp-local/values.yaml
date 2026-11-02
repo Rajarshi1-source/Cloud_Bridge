@@ -1,6 +1,7 @@
 # Local twin of cb-gcp-budget (tools/dev/twin.sh): the same k3s, charts and ring on this machine, so
 # Weeks 4-8 can be exercised without a cloud account. It must stay identical to cb-gcp-budget except
-# for cell, the comments and secretStore: anything else would make the twin prove nothing.
+# for cell, the comments, secretStore and the Access stand-in's address in network.accessCidrs:
+# anything else would make the twin prove nothing.
 cell: cb-gcp-local
 cloud: gcp
 # k3s pulls docker.io through the twin's pull-through mirror (registries.yaml written by twin.yml).
@@ -10,12 +11,15 @@ ingress:
   className: traefik
 network:
   ingressNamespaces: [traefik]
+  accessCidrs: [172.29.80.7/32]   # twin-access in tools/dev/twin/compose.yaml, instead of Cloudflare
 budgetData:
   enabled: true
 # Same 2 GiB budget sizing as the cloud cell, so the twin catches a cell that no longer fits.
+# One JVM per service: starting pegs its CPU, so the HPA would add a second replica of everything
+# at every restart, and they don't fit (the twin's cell ran out of memory and looped).
 replicas:
   min: 1
-  max: 2
+  max: 1
 resourceOverrides:
   api-gateway:
     requests: { cpu: 100m, memory: 256Mi }

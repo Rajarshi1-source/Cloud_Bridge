@@ -200,3 +200,9 @@ python3 evals/steering/backtest.py
 
 **2026-11-01 — gitops-delivery (local two-cell twin)**
 - gitops-delivery: new "Local twin" section (`tools/dev/twin.sh`, two k3s cells built by the budget roles behind a Traefik edge generated from `terraform.tfvars.json`) and a "Test this chart change without a cloud" row. The twin found that the root ApplicationSet needs `argocd.argoproj.io/compare-options: ServerSideDiff=true`: with the client-side diff, Rollouts (the HPA owns `spec.replicas`) and the postgres StatefulSet (`volumeClaimTemplates` defaults) stay OutOfSync forever.
+
+**2026-11-02 — cell-services, terraform-cells, gitops-delivery, ansible-ops (Week 4)**
+- cell-services: lease admin API built. `POST /admin/leases/grant` gains `reportedSold` and answers `grantedQty`; I4 builds the running total from the reported sold with `GREATEST`. A randomized allocator test oversold without both. The code in `services/inventory-service` replaces the listing in `security-and-api.md` §6.7. Roles section records what the migrations do and that nothing logs in as those roles yet.
+- terraform-cells: `secret_store` output (five outputs now), `modules/secret-store/{aws,gcp}`, `modules/bootstrap`, `live/<cloud>-dev/20-bootstrap`. RDS moves to `random_password` so both clouds store `{username, password}` under `<cell>-db-admin`.
+- gitops-delivery: `twin.sh images` and `twin.sh leases`; External Secrets and AWS Load Balancer Controller add-ons; `cb-<cloud>-dev` cell values.
+- ansible-ops: `cell_secrets` writes `cell-admin` and fails without the `CF_ACCESS_*` values.

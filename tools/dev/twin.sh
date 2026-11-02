@@ -7,7 +7,10 @@
 #   bash tools/dev/twin.sh up              # build/refresh everything and wait until both cells serve
 #   bash tools/dev/twin.sh sync            # publish the working tree again; Argo CD re-syncs
 #   bash tools/dev/twin.sh weights         # re-read terraform.tfvars.json into the edge
+#   bash tools/dev/twin.sh images [off]    # run service code from the working tree, not the ring digests
+#   bash tools/dev/twin.sh promote         # skip the canaries: only the new images, and wait for them
 #   bash tools/dev/twin.sh check           # split, affinity, API smoke through the edge
+#   bash tools/dev/twin.sh leases          # allocator, forged grants, restarts, no overselling
 #   bash tools/dev/twin.sh outage aws|gcp  # pause a whole cell; traffic must move; then restore it
 #   bash tools/dev/twin.sh kubectl aws|gcp ARGS...  # the cell's bundled kubectl
 #   bash tools/dev/twin.sh status | down | purge
@@ -17,9 +20,13 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TWIN_DIR="${CB_TWIN_DIR:-$HOME/.cache/cloudbridge-twin}"
 NET="${CB_TWIN_NET:-172.29.80}"
 EDGE_PORT="${CB_TWIN_EDGE_PORT:-8443}"
+REGISTRY_PORT="${CB_TWIN_REGISTRY_PORT:-5500}"
 TOOLBOX_IMAGE=cloudbridge/ansible-toolbox:local
-export TWIN_DIR CB_TWIN_NET="$NET" CB_TWIN_EDGE_PORT="$EDGE_PORT"
 DOMAIN=$(sed -n 's/^domain:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$REPO/gitops/global/values.yaml")
+export TWIN_DIR CB_TWIN_NET="$NET" CB_TWIN_EDGE_PORT="$EDGE_PORT" CB_TWIN_REGISTRY_PORT="$REGISTRY_PORT" CB_TWIN_DOMAIN="$DOMAIN"
+TWIN_ACCESS_AUD=twin-admin
+TWIN_ALLOCATOR_ID=twin-allocator.access
+access_issuer() { echo "http://$NET.7:443"; }
 HOST="app.$DOMAIN"
 CELLS="aws gcp"
 ring_of() { [ "$1" = aws ] && echo ring-main || echo ring-canary; }   # as in gitops/cells and Ansible
@@ -33,22 +40,61 @@ as_root() { # files written by the toolbox and k3s are root-owned; manage them t
 }
 
 pki() { # local stand-ins for the Cloudflare Origin CA certificate and the edge certificate
-  [ -f "$TWIN_DIR/pki/edge.crt" ] && return
   local d="$TWIN_DIR/pki"; mkdir -p "$d"
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 825 -subj "/CN=CloudBridge twin CA" \
+  # Python 3.13+ verifies strictly: the CA needs key usage, and leaf certificates an authority key ID.
+  if [ -f "$d/ca.crt" ] && ! openssl x509 -in "$d/ca.crt" -noout -ext keyUsage 2>/dev/null | grep -q 'Certificate Sign'; then
+    rm -f "$d"/*.crt "$d"/*.key "$d"/*.srl
+  fi
+  [ -f "$d/ca.crt" ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 825 \
+    -subj "/CN=CloudBridge twin CA" -addext 'keyUsage=critical,keyCertSign,cRLSign' \
     -keyout "$d/ca.key" -out "$d/ca.crt" 2>/dev/null
   issue() { # name, SANs
+    [ -f "$d/$1.crt" ] && return
     openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$HOST" \
       -keyout "$d/$1.key" -out "$d/$1.csr" 2>/dev/null
     openssl x509 -req -in "$d/$1.csr" -CA "$d/ca.crt" -CAkey "$d/ca.key" -CAcreateserial -days 825 \
-      -extfile <(printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\n' "$2") -out "$d/$1.crt" 2>/dev/null
+      -extfile <(printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature\nauthorityKeyIdentifier=keyid\nsubjectKeyIdentifier=hash\n' "$2") \
+      -out "$d/$1.crt" 2>/dev/null
     rm -f "$d/$1.csr"
   }
   # One origin certificate for both cells, like 20-origin-tls: app plus each cell's admin host.
   issue origin "DNS:$HOST,DNS:admin-aws.$DOMAIN,DNS:admin-gcp.$DOMAIN"
   issue edge "DNS:$HOST"
+  issue edge-admin "DNS:admin-aws.$DOMAIN,DNS:admin-gcp.$DOMAIN"
   chmod 0644 "$d"/*.crt "$d"/*.key   # read by the toolbox and Traefik containers; local test keys only
   echo "pki: twin CA, origin and edge certificates in $d"
+}
+
+access() { # the service tokens the Access stand-in knows: the allocator's, and one the cells don't allow
+  local d="$TWIN_DIR/access"; mkdir -p "$d"
+  [ -f "$d/allocator.env" ] && return
+  local secret other; secret=$(openssl rand -hex 32); other=$(openssl rand -hex 32)
+  printf 'CF_ACCESS_CLIENT_ID=%s\nCF_ACCESS_CLIENT_SECRET=%s\n' "$TWIN_ALLOCATOR_ID" "$secret" >"$d/allocator.env"
+  printf '{"%s": "%s", "twin-other.access": "%s"}\n' "$TWIN_ALLOCATOR_ID" "$secret" "$other" >"$d/service-tokens.json"
+  chmod 0644 "$d"/*   # local test tokens, read by the containers
+  echo "access: service tokens in $d"
+}
+
+# Cells normally run the ring digests. After `images`, the snapshot's ring files name digests built
+# from the working tree instead (in the snapshot only: gitops/releases/ never changes).
+images() {
+  local dir="$TWIN_DIR/images" user svc ref digest
+  if [ "${1:-}" = off ]; then rm -rf "$dir"; publish; refresh; echo "cells return to the ring digests"; return; fi
+  mkdir -p "$dir"
+  compose --progress quiet up -d twin-registry
+  user=$(sed -n 's/.*: \([^/]*\)\/cb-api-gateway@.*/\1/p' "$REPO/gitops/releases/ring-main.yaml")
+  { echo "# Twin overlay, built from the working tree by twin.sh images."; echo "images:"; } >"$dir/ring.tmp"
+  for svc in api-gateway order-service inventory-service; do
+    ref="127.0.0.1:$REGISTRY_PORT/$user/cb-$svc:twin"
+    echo "building $svc"
+    DOCKER_BUILDKIT=1 docker build -q -t "$ref" "$REPO/services/$svc" >/dev/null
+    digest=$(docker push "$ref" | sed -n 's/.*digest: \(sha256:[0-9a-f]*\).*/\1/p')
+    [ -n "$digest" ] || { echo "push of $svc gave no digest"; exit 1; }
+    echo "  $svc: $user/cb-$svc@$digest" >>"$dir/ring.tmp"
+    echo "  $svc: $digest"
+  done
+  echo "commit: working-tree" >>"$dir/ring.tmp"
+  mv "$dir/ring.tmp" "$dir/ring.yaml"
 }
 
 publish() { # snapshot the working tree (tracked + untracked, minus .gitignore) as branch "twin"
@@ -60,6 +106,12 @@ publish() { # snapshot the working tree (tracked + untracked, minus .gitignore) 
          GIT_COMMITTER_NAME=cloudbridge-twin GIT_COMMITTER_EMAIL=twin@localhost
   GIT_INDEX_FILE="$idx" "${g[@]}" read-tree HEAD
   GIT_INDEX_FILE="$idx" "${g[@]}" add -A
+  if [ -f "$TWIN_DIR/images/ring.yaml" ]; then # run the working tree's service images (twin.sh images)
+    local blob ring; blob=$("${g[@]}" hash-object -w "$TWIN_DIR/images/ring.yaml")
+    for ring in ring-main ring-canary; do
+      GIT_INDEX_FILE="$idx" "${g[@]}" update-index --add --cacheinfo "100644,$blob,gitops/releases/$ring.yaml"
+    done
+  fi
   local tree commit
   tree=$(GIT_INDEX_FILE="$idx" "${g[@]}" write-tree)
   commit=$(echo "twin snapshot of $("${g[@]}" rev-parse --short HEAD)" | "${g[@]}" commit-tree "$tree" -p HEAD)
@@ -77,7 +129,9 @@ render() { # the budget roles, run against directories the cells mount
         ansible-playbook -i localhost, -c local playbooks/twin.yml \
           -e cb_cell="cb-$cloud-local" -e cb_cloud="$cloud" -e cb_ring="$(ring_of "$cloud")" \
           -e twin_dir="/twin/cb-$cloud-local" -e twin_pki=/twin/pki \
-          -e twin_git_url="http://$NET.6/git/cloud_bridge.git" 2>&1); then
+          -e twin_git_url="http://$NET.6/git/cloud_bridge.git" \
+          -e cell_secrets_access_team_domain="$(access_issuer)" -e cell_secrets_access_aud="$TWIN_ACCESS_AUD" \
+          -e cell_secrets_access_allowed_client_ids="$TWIN_ALLOCATOR_ID" 2>&1); then
       echo "$out"; echo "render failed for cb-$cloud-local"; exit 1
     fi
     echo "ansible: cb-$cloud-local $(grep -oE 'ok=[0-9]+ +changed=[0-9]+' <<<"$out" | tr -s ' ')"
@@ -184,6 +238,21 @@ check() {
   [ $fail -eq 0 ] && echo "TWIN CHECK PASSED" || { echo "TWIN CHECK FAILED"; exit 1; }
 }
 
+promote() { # the new images everywhere, now. The old and new ReplicaSets of a canary do not fit in a
+  # cell at once and thrash each other past the startup probe, and the twin has no traffic to protect:
+  # delete the Rollouts and Argo CD recreates them with only the new images.
+  local cloud deadline=$(( $(date +%s) + 600 )) state
+  for cloud in $CELLS; do kc "$cloud" -n cb-app delete rollout,hpa --all --wait=false >/dev/null; done
+  for cloud in $CELLS; do
+    until state=$(kc "$cloud" -n cb-app get rollout -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}/{.status.stableRS}/{.status.currentPodHash} {end}') \
+        && [ "$(echo "$state" | wc -w)" = 3 ] && ! echo "$state" | tr ' ' '\n' | awk -F'[=/]' 'NF && ($2!="Healthy" || $3!=$4) {f=1} END {exit !f}'; do
+      [ "$(date +%s)" -lt "$deadline" ] || { echo "FAIL cb-$cloud-local still rolling: $state"; exit 1; }
+      sleep 10
+    done
+    echo "promoted: cb-$cloud-local runs only the new images"
+  done
+}
+
 outage() { # the whole cell disappears, as in a cloud outage; the edge must move every user
   local down=$1 other; case "$down" in aws) other=gcp ;; gcp) other=aws ;; *) echo "outage aws|gcp"; exit 2 ;; esac
   echo "pausing cell-$down (every container in it freezes)"
@@ -208,20 +277,29 @@ outage() { # the whole cell disappears, as in a cloud outage; the edge must move
 case "${1:-}" in
   up)
     mkdir -p "$TWIN_DIR"
-    pki; publish; render; weights
+    pki; access; publish; render; weights
     compose --progress quiet up -d --build --remove-orphans --quiet-pull
     refresh
     echo "Argo CD is installing and syncing both cells (first start: about 10 minutes)."
     wait_ready
     echo "Edge: curl --cacert $TWIN_DIR/pki/ca.crt --resolve $HOST:$EDGE_PORT:127.0.0.1 $(edge_url /healthz/cell)"
     ;;
+  images)
+    images "${2:-}"
+    if [ "${2:-}" != off ]; then
+      publish
+      if [ -n "$(compose ps -q cell-aws 2>/dev/null)" ]; then refresh; echo "Argo CD rolls the new images out (watch: bash tools/dev/twin.sh status)"; fi
+    fi
+    ;;
   sync) publish; render; refresh; echo "Argo CD re-syncs from the new snapshot (watch: bash tools/dev/twin.sh status)" ;;
   weights) weights ;;
   check) check ;;
+  promote) promote ;;
+  leases) source "$REPO/tools/dev/twin/leases.sh"; leases ;;
   outage) outage "${2:-}" ;;
   status) status ;;
   kubectl) case "${2:-}" in aws|gcp) kc "${@:2}" ;; *) echo "kubectl aws|gcp ARGS..."; exit 2 ;; esac ;;
   down) compose down; echo "stopped; cells, data and certificates kept (purge removes them)" ;;
   purge) compose down -v; as_root "rm -rf /twin/*"; echo "removed the twin's volumes and $TWIN_DIR" ;;
-  *) sed -n '2,14p' "$0"; exit 2 ;;
+  *) sed -n '2,16p' "$0"; exit 2 ;;
 esac

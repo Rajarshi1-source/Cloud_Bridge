@@ -10,14 +10,17 @@ resources:
   requests: { cpu: 200m, memory: 320Mi }
   limits: { cpu: "1", memory: 512Mi }
 javaToolOptions: "-XX:+UseSerialGC -Xss512k"
-# database: /healthz/cell runs SELECT 1 (a read-only health_reader role arrives in Week 4).
+# database: /healthz/cell runs SELECT 1 with the owner credentials. The health_reader role exists
+# since Week 4 (Flyway), but nothing sets its password yet.
 database: true
 cache: true
+adminAuth: true          # validates the Access JWT on the admin host; refuses to start without it
 env:
   ORDER_URL: "http://order-service:8081"
   INVENTORY_URL: "http://inventory-service:8082"
   ORDER_READINESS_URL: "http://order-service:9080/actuator/health/readiness"
   CB_CORS_ORIGINS: "https://cp.{{ .Values.domain }}"
+  CB_ADMIN_HOST: "admin-{{ .Values.cloud }}.{{ .Values.domain }}"
 ingress:
   enabled: true          # className + annotations come from the cell
 analysis:

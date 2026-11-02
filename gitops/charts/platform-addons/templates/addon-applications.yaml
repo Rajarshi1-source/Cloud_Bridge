@@ -39,6 +39,54 @@ spec:
     server: https://kubernetes.default.svc
     namespace: argo-rollouts
   {{- include "platform-addons.appSync" . | nindent 2 }}
+{{- if .Values.externalSecrets.enabled }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: external-secrets
+  namespace: {{ .Values.argocdNamespace }}
+  labels: { cb-cell: {{ .Values.cell }} }
+spec:
+  project: default
+  source:
+    repoURL: https://charts.external-secrets.io
+    chart: external-secrets
+    targetRevision: {{ .Values.addons.externalSecrets.chartVersion | quote }}
+    helm:
+      valuesObject:
+        fullnameOverride: external-secrets   # the service account infra/modules/secret-store grants
+        serviceAccount:
+          name: external-secrets
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-secrets
+  {{- include "platform-addons.appSync" . | nindent 2 }}
+{{- end }}
+{{- if eq .Values.ingress.className "alb" }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aws-load-balancer-controller
+  namespace: {{ .Values.argocdNamespace }}
+  labels: { cb-cell: {{ .Values.cell }} }
+spec:
+  project: default
+  source:
+    repoURL: https://aws.github.io/eks-charts
+    chart: aws-load-balancer-controller
+    targetRevision: {{ .Values.addons.awsLoadBalancerController.chartVersion | quote }}
+    helm:
+      valuesObject:
+        clusterName: {{ .Values.cell }}
+        serviceAccount:
+          name: aws-load-balancer-controller  # its Pod Identity association is in infra/modules/cluster/aws-eks
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  {{- include "platform-addons.appSync" . | nindent 2 }}
+{{- end }}
 {{- if eq .Values.ingress.className "traefik" }}
 ---
 # k3s ships Traefik, but the k3s_server role disables it: Argo CD installs it here instead, so the

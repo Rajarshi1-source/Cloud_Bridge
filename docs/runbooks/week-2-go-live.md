@@ -176,6 +176,7 @@ India-specific (not confirmed in official docs; check during sign-up):
    ```bash
    export CB_HOSTNAME=app.<domain> DOCKERHUB_USER=<docker id> \
           GCP_PROJECT_ID=<project-id> GCP_OSLOGIN_USER=<your OS Login user>
+   export CF_ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com   # team name from section 2
    read -rs CLOUDFLARE_API_TOKEN && export CLOUDFLARE_API_TOKEN
    ```
    Your OS Login username is shown by `gcloud compute os-login describe-profile`.
@@ -198,9 +199,13 @@ make budget-up
 Terraform prints each plan before applying it; read the AWS and GCP plans before you confirm. In order:
 1. Both foundations: the VMs, static IPs, and firewalls admitting 443 only from Cloudflare.
 2. `global/20-origin-tls`: the Origin CA certificate, stored in both secret managers.
-3. `make configure` (Ansible): hardening, k3s, the registry token, cell secrets, origin TLS and
-   Argo CD. It then waits until each origin answers `/healthz/cell` locally.
-4. `global/30-traffic`: monitor, pools, the 70/30 load balancer, admin records and Access.
+3. `global/30-traffic`: monitor, pools, the 70/30 load balancer, admin records and Access. It comes
+   before Ansible because the cells validate Access JWTs against the audience this stack creates. The
+   site answers 503 until step 4 finishes.
+4. `make configure` (Ansible): hardening, k3s, the registry token, cell secrets (`cell-admin` takes
+   the Access audience and allocator client ID from `30-traffic`), origin TLS and Argo CD. It then waits
+   until each origin answers `/healthz/cell` locally. Re-run it whenever `30-traffic` was destroyed:
+   a new Access application has a new audience.
 
 The first Argo CD sync pulls four charts and three images onto a 2 GiB VM: allow 5–10 minutes.
 
@@ -255,6 +260,9 @@ Confirmed as stated in the drafts:
 
 ## Known limits
 
+- **Cells sell nothing until an allocator grants leases.** Week 4 stopped seeding leases on real cells,
+  and the allocator's deployment is Week 6 (the control-plane VM), so `POST /orders` answers
+  `out-of-stock-in-cell` once images from Week 4 are released. Reads and health work.
 - The 2 GiB budget VMs are a tight fit. If a pod stays Pending, check `kubectl describe` before raising
   requests; the budget overrides are in `gitops/cells/<cell>/values.yaml`.
 - `t3.small` runs in "unlimited" burst mode by default. Sustained CPU above its baseline costs extra,

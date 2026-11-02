@@ -11,8 +11,9 @@ Cloudflare behaviour it reproduces:
   - the /healthz/cell monitor with the app hostname as Host header; an unhealthy cell leaves the
     rotation, and when every weighted cell is down the fallback cell takes everything
   - Full (strict) TLS to the origin, verified against the twin's origin CA
+  - admin-<cloud> hosts that go straight to one cell, behind Access (access_standin.py)
 Differences, on purpose: the monitor runs every 10 s instead of 60 s and from one place instead of
-two regions, so drills finish in seconds; there is no Access in front of admin-<cloud> hosts yet.
+two regions, so drills finish in seconds.
 
     python3 edge_config.py <repo> <out.yaml>
 Output is JSON, which Traefik's file provider reads as YAML.
@@ -72,23 +73,51 @@ def render(domain: str, weights: dict[str, int]) -> dict:
     services["app"] = {
         "failover": {"service": "weighted", "fallback": f"cell-{FALLBACK}", "healthCheck": {}}
     }
+    routers = {
+        "app": {
+            "rule": f"Host(`{host}`)",
+            "entryPoints": ["websecure"],
+            "service": "app",
+            "tls": {},
+        }
+    }
+    transports = {"origin": {"serverName": host, "rootCAs": ["/pki/ca.crt"]}}
+    for cloud in CELLS:  # proxied straight to one origin, never through the load balancer
+        admin = f"admin-{cloud}.{domain}"
+        routers[f"admin-{cloud}"] = {
+            "rule": f"Host(`{admin}`)",
+            "entryPoints": ["websecure"],
+            "middlewares": ["access"],
+            "service": f"admin-{cloud}",
+            "tls": {},
+        }
+        services[f"admin-{cloud}"] = {
+            "loadBalancer": {
+                "servers": [{"url": f"https://cell-{cloud}:443"}],
+                "passHostHeader": True,
+                "serversTransport": f"admin-{cloud}",
+            }
+        }
+        transports[f"admin-{cloud}"] = {"serverName": admin, "rootCAs": ["/pki/ca.crt"]}
     return {
         "http": {
-            "routers": {
-                "app": {
-                    "rule": f"Host(`{host}`)",
-                    "entryPoints": ["websecure"],
-                    "service": "app",
-                    "tls": {},
+            "routers": routers,
+            "middlewares": {
+                "access": {
+                    "forwardAuth": {
+                        "address": "http://twin-access:443/auth",
+                        "authResponseHeaders": ["Cf-Access-Jwt-Assertion"],
+                    }
                 }
             },
             "services": services,
-            "serversTransports": {
-                "origin": {"serverName": host, "rootCAs": ["/pki/ca.crt"]}
-            },
+            "serversTransports": transports,
         },
         "tls": {
-            "certificates": [{"certFile": "/pki/edge.crt", "keyFile": "/pki/edge.key"}],
+            "certificates": [
+                {"certFile": "/pki/edge.crt", "keyFile": "/pki/edge.key"},
+                {"certFile": "/pki/edge-admin.crt", "keyFile": "/pki/edge-admin.key"},
+            ],
         },
     }
 

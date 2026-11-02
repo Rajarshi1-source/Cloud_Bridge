@@ -85,13 +85,35 @@ make the Artifact Registry mirror authenticate to Docker Hub with your `cb-docke
    it also reaps cells you brought up from the laptop. Until step 1 is done it only prints a notice;
    use `make reap` meanwhile.
 
-## What's deferred to Week 4
+## Running the app on a managed cell (Week 4)
 
-The managed cells' `20-bootstrap` comes in Week 4, with:
-- Argo CD and the root ApplicationSet, installed by Terraform
-- the `cb-<cloud>-dev` and prod cell values
-- AWS Load Balancer Controller and ALB / GCE ingress health checks
-- External Secrets for the DB, cache and origin TLS Secrets
+**Not yet run on a cloud.** This has only mock-provider tests and rendered manifests, so expect to fix
+things the first time, and keep the TTL short.
 
-Those need the data layer and secret plumbing Week 4 builds. Week 3 already creates the IAM side
-(Pod Identity roles for the ALB controller and the EBS CSI driver).
+`10-foundation` also creates the cell's secrets (`<cell>-cell-config`, plus `<cell>-db-admin` while the
+dev stacks keep `managed_data = false`) and the External Secrets identity. `20-bootstrap` installs
+Argo CD and the root ApplicationSet, which installs everything else: External Secrets, on AWS the
+Load Balancer Controller, the services, and the ALB or GCE ingress.
+
+1. Apply `global/20-origin-tls` and `global/30-traffic` first (Week 2 runbook). The cell needs the
+   Origin CA certificate and the Access audience.
+2. Pass the Access values when bringing the cell up. Without them the gateway and inventory-service
+   have no `cell-admin` Secret and don't start:
+   ```bash
+   export TF_VAR_admin_access="{team_domain=\"https://<team>.cloudflareaccess.com\",audience=\"$(terraform -chdir=live/global/30-traffic output -raw admin_access_aud)\",allowed_client_ids=\"$(terraform -chdir=live/global/30-traffic output -raw allocator_client_id)\"}"
+   ```
+   ```bash
+   make managed-up CLOUD=gcp TTL=4
+   ```
+3. Install Argo CD:
+   ```bash
+   make managed-bootstrap CLOUD=gcp
+   ```
+4. Point `30-traffic` at the cell's origin. On GCP that's the static IP from `10-foundation`; on AWS
+   the ALB's hostname exists only after the controller runs, so read it from the Ingress and set it by hand.
+
+**Before `make managed-down`, delete the Ingress or run `terraform destroy` in `20-bootstrap`.** The ALB
+belongs to the controller, not to Terraform. The TTL reaper destroys only `10-foundation`, so an ALB left
+behind can block the VPC's destroy on AWS.
+
+Cells sell nothing until an allocator grants them leases, and the allocator's real deployment is Week 6.

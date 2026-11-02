@@ -100,6 +100,22 @@ spec:
         - podSelector: { matchLabels: { app: order-service } }
       ports: [{ port: 8082 }]
 ---
+# Gateway and inventory-service validate the Access JWT, so both fetch its signing keys.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: access-keys-egress
+spec:
+  podSelector:
+    matchExpressions: [{ key: app, operator: In, values: [api-gateway, inventory-service] }]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        {{- range .Values.network.accessCidrs }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+      ports: [{ port: 443 }]
+---
 # Apps → the cell's Postgres and Valkey (in-cluster on budget, CIDRs on managed).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

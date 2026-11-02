@@ -26,7 +26,7 @@ Pick versions by **intersection**: if one cloud offers something newer, wait. Pa
 
 ```
 infra/modules/cell/                 facade (Abstract Factory) + tests/contract.tftest.hcl
-infra/modules/{network,cluster,database,cache,registry-mirror,ci-identity,bootstrap}/<impl>/
+infra/modules/{network,cluster,database,cache,registry-mirror,secret-store,ci-identity}/<impl>/   infra/modules/bootstrap/
 infra/live/<cloud>-<env>/10-foundation   network + cluster + data      (one state)
 infra/live/<cloud>-<env>/20-bootstrap    Argo CD + root ApplicationSet (one state)
 infra/live/global/00-ci-identity         OIDC roles (bootstrapped once by a human)
@@ -39,7 +39,7 @@ infra/live/global/30-traffic             Cloudflare (owned by cloudbridge-cloudf
 
 ## The facade contract
 
-`modules/cell` takes `cloud`, `profile`, `env`, `region`, `shape`, `kubernetes_minor`, `node_count`, `node_max`, `admin_cidrs`, `cloudflare_ipv4`, `gcp_project_id`, `ci_role_arn`, `managed_cache`, plus (Week 3) `managed_data`, `expires_at`, `admin_principal_arns`, `image_mirror`, `dockerhub_credentials_secret`, `dockerhub_user`, and returns exactly four outputs:
+`modules/cell` takes `cloud`, `profile`, `env`, `region`, `shape`, `kubernetes_minor`, `node_count`, `node_max`, `admin_cidrs`, `cloudflare_ipv4`, `gcp_project_id`, `ci_role_arn`, `managed_cache`, plus (Week 3) `managed_data`, `expires_at`, `admin_principal_arns`, `image_mirror`, `dockerhub_credentials_secret`, `dockerhub_user`, and returns exactly five outputs:
 
 | Output | Shape | Notes |
 |---|---|---|
@@ -47,6 +47,7 @@ infra/live/global/30-traffic             Cloudflare (owned by cloudbridge-cloudf
 | `cluster` (sensitive) | `{name, endpoint, ca_certificate, k8s_version, origin, node_security_group, auth}` | identical keys for EKS, GKE, k3s-aws, k3s-gcp |
 | `database` (sensitive) | `{host, port, secret_ref}` or `null` | `null` → bootstrap installs in-cluster Postgres |
 | `cache` (sensitive) | `{host, port, tls}` or `null` | `null` → in-cluster Valkey |
+| `secret_store` | `{kind, prefix, reader}` or `null` | what External Secrets reads on a managed cell; `null` on budget (Ansible writes the Secrets) |
 
 Selecting the implementation:
 
@@ -84,6 +85,8 @@ Every pair must match vCPU, memory and CPU class. Rev 1 mapped `t3.large` (2/8) 
 **GKE** — zonal (`location = "<region>-a"`, eligible for GKE's free-tier management credit), `release_channel = REGULAR`, `min_master_version = var.k8s_version`, maintenance window at night IST, `datapath_provider = "ADVANCED_DATAPATH"` (NetworkPolicy enforced), private nodes + master authorized networks, dedicated node service account with only logWriter / metricWriter / monitoring.viewer / artifactregistry.reader, `workload_metadata_config.mode = GKE_METADATA`, shielded nodes, `deletion_protection = var.env == "prod"`.
 
 **k3s VM (budget profile)** — Terraform creates only the VM, static IP, firewall (443 from Cloudflare ranges, nothing else public), and tags/labels `cb-ansible-role = k3s_server`. The AWS module also creates the S3 transfer bucket Ansible's SSM connection needs. **Every live stack configures both providers** (the facade wires both clouds), so the other cloud's provider gets a placeholder config; read Cloudflare's ranges with the `http` provider so cell stacks hold no Cloudflare credentials (references §7b). No `remote-exec`/`local-exec`: Ansible discovers the VM by tag and configures it (see cloudbridge-ansible-ops). No public SSH — AWS uses SSM (instance profile with `AmazonSSMManagedInstanceCore`), GCP uses IAP (firewall allows `35.235.240.0/20` on 22).
+
+**Secrets on managed cells** — `modules/secret-store/{aws,gcp}` writes `<cell>-cell-config` (`jdbcUrl`, `cacheUrl`, Access values) and, when Postgres runs in the cluster, `<cell>-db-admin`; the database modules write `<cell>-db-admin` as JSON `{username, password}` on both clouds, so one set of ExternalSecrets in `platform-addons` reads either. The controller identity is limited to `<cell>-*` plus the origin certificate (Pod Identity on EKS, a direct Workload Identity Federation principal on GKE, so no annotation carries a project ID). `modules/bootstrap` installs Argo CD and the root ApplicationSet through a local chart, because `kubernetes_manifest` needs the CRD at plan time, which a new cluster doesn't have.
 
 **Data services** — `prevent_destroy = true` on databases, caches and state buckets; DB passwords from `random_password` written straight to Secrets Manager / Secret Manager (outputs carry a `secret_ref`, never the password); Multi-AZ / regional HA only in prod.
 

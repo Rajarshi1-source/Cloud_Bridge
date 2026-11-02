@@ -27,17 +27,25 @@ x-java-env: &java-env
   SPRING_DATASOURCE_USERNAME: cell
   SPRING_DATASOURCE_PASSWORD: cell
 
+# No allocator or Cloudflare Access on a laptop. The services refuse to start without admin config,
+# so these placeholders satisfy it; nothing can sign a token for this issuer, so /admin stays closed.
+x-admin-auth: &admin-auth
+  CF_ACCESS_TEAM_DOMAIN: https://access.invalid
+  CF_ACCESS_AUD: local-no-access
+  CF_ACCESS_ALLOWED_CLIENT_IDS: local-no-access
+
 services:
   api-gateway:
     <<: *java
     build: ./services/api-gateway
     ports: ["8080:8080"]
     environment:
-      <<: *java-env
+      <<: [*java-env, *admin-auth]
       ORDER_URL: http://order-service:8081
       INVENTORY_URL: http://inventory-service:8082
       ORDER_READINESS_URL: http://order-service:9080/actuator/health/readiness
       CB_CORS_ORIGINS: http://localhost:3000
+      CB_ADMIN_HOST: admin.localhost
     depends_on:
       order-service:
         condition: service_healthy
@@ -60,7 +68,7 @@ services:
     <<: *java
     build: ./services/inventory-service
     environment:
-      <<: *java-env                    # `local` profile seeds SKU-1 / SKU-2 with a long-lived lease
+      <<: [*java-env, *admin-auth]     # `local` profile seeds SKU-1 / SKU-2 with a long-lived lease
     depends_on:
       postgres:
         condition: service_healthy

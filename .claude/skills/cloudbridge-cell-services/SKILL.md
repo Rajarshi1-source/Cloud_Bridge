@@ -60,7 +60,7 @@ UPDATE inventory_lease
  WHERE sku = :sku AND expires_at > now() AND sold_qty + :qty <= granted_qty
 RETURNING granted_qty - sold_qty AS remaining;      -- 0 rows → 409 OUT_OF_STOCK_IN_CELL
 ```
-One statement, no read-modify-write race; `CHECK (sold_qty <= granted_qty)` backs it up. The cell never calls out: every 5 min the allocator reads `GET /admin/leases/report` (`sold_qty` per SKU) and re-grants with `POST /admin/leases/grant` carrying `epoch + 1`. A renewal or grant carrying an **older epoch is rejected** — that's the fence that stops a zombie cell (partitioned, clock-skewed) from overwriting a newer grant. When a lease expires the cell stops selling that SKU by itself; the allocator waits `expires_at + 60 s` before re-granting the unsold quantity elsewhere.
+One statement, no read-modify-write race; `CHECK (sold_qty <= granted_qty)` backs it up. The cell never calls out: every 5 min the allocator reads `GET /admin/leases/report` (`sold_qty` per SKU) and re-grants with `POST /admin/leases/grant` carrying `epoch + 1` and the `sold_qty` it saw (`reportedSold`). A renewal or grant carrying an **older epoch is rejected** — that's the fence that stops a zombie cell (partitioned, clock-skewed) from overwriting a newer grant. When a lease expires the cell stops selling that SKU by itself; the allocator waits `expires_at + 60 s` before re-granting the unsold quantity elsewhere.
 
 Trade-off to state plainly: **never oversells, may briefly undersell** (stock stranded in an unreachable cell until its lease expires).
 

@@ -155,6 +155,7 @@ export UNIQUE="FILL-IN-PART-3"
 export DOMAIN="FILL-IN-PART-7"
 export CF_ZONE_ID="FILL-IN-PART-7"
 export CF_ACCOUNT_ID="FILL-IN-PART-7"
+export CF_ACCESS_TEAM_DOMAIN="https://FILL-IN-PART-7.cloudflareaccess.com"
 export GCP_OSLOGIN_USER="FILL-IN-PART-6"
 export GCP_BUCKET="cb-tfstate-gcp-$UNIQUE"
 export AWS_BUCKET="cb-tfstate-aws-$UNIQUE"
@@ -542,14 +543,15 @@ nano ~/cloudbridge-go-live.env
 This protects your cells' private admin addresses.
 
 1. In the dashboard, open **Zero Trust**.
-2. Choose a **team name** and write it down. Week 4 needs it.
+2. Choose a **team name** and write it down. It goes in your settings file in the next step.
 3. Choose the **Free** plan. It asks for a card, but says you won't be charged on Free.
 
 ### 7.4 Copy two IDs
 
 Open your domain's **Overview** page. On the right you'll find **Zone ID** and **Account ID**. These
 aren't secrets. Put them, with your domain, into your settings file (the `DOMAIN` value has no `https://`
-and no `www`, just `example.com`):
+and no `www`, just `example.com`). On the `CF_ACCESS_TEAM_DOMAIN` line, replace only `FILL-IN-PART-7`
+with your team name, and keep the rest of the address:
 
 ```bash
 nano ~/cloudbridge-go-live.env
@@ -726,7 +728,20 @@ your computers is encrypted. **This one applies with no question**, but it's sma
 make -C infra origin-tls
 ```
 
-### Step 4: Set up both computers with Ansible (about 15–25 minutes)
+### Step 4: Turn on Cloudflare
+
+This creates the load balancer, the health checks and the protected admin addresses. Your computers need
+the ID of those protected addresses, so this comes first. **It also applies with no question, and your
+site goes public at the end of it**, showing an error page until the next step finishes.
+
+```bash
+make -C infra traffic
+```
+
+It should end with `Apply complete!`. The last lines include `allocator_client_secret = <sensitive>`,
+which is meant to stay hidden.
+
+### Step 5: Set up both computers with Ansible (about 15–25 minutes)
 
 Ansible logs in to each computer, hardens it, and installs k3s and Argo CD. Argo CD then installs your
 app. At the end it keeps retrying a health check for up to 10 minutes, so long waits are normal there.
@@ -740,19 +755,7 @@ Near the end, you want to see `failed=0` and `unreachable=0` for both computers.
 A brand-new AWS computer can take a few minutes to become reachable. If Ansible says `UNREACHABLE`
 straight away, wait 5 minutes and run it again. Running it twice is safe.
 
-**At this point both cells work, but the public can't reach them yet.**
-
-### Step 5: Turn on Cloudflare
-
-This creates the load balancer, the health checks and the protected admin addresses. **It also applies
-with no question, and your site goes public at the end of it.**
-
-```bash
-make -C infra traffic
-```
-
-It should end with `Apply complete!`. The last lines include `allocator_client_secret = <sensitive>`,
-which is meant to stay hidden.
+**At this point both cells work and the public can reach them.**
 
 ---
 
@@ -807,8 +810,10 @@ curl -m 10 -k https://THE-IP/healthz/cell
 
 ### What won't work yet
 
-Buying stock across the two clouds needs the lease allocator from Week 4, so placing a real order may be
-refused. Dashboards and canary analysis arrive in Weeks 5–7. That's expected at this stage.
+Each cell may only sell what the lease allocator grants it. The allocator is built, but it runs on the
+control-plane computer that arrives in Week 6, so placing a real order is refused with
+`out-of-stock-in-cell` until then. Dashboards and canary analysis arrive in Weeks 5–7. That's expected at
+this stage.
 
 ---
 

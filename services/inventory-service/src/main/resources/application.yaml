@@ -16,6 +16,7 @@ spring:
   flyway:
     schemas: inventory
     default-schema: inventory
+    locations: classpath:db/migration,classpath:db/catalog
   data:
     redis:
       url: ${VALKEY_URL:redis://localhost:6379}
@@ -54,6 +55,15 @@ cloudbridge:
   cell: ${CB_CELL:cb-local-dev}
   reservations:
     hold-minutes: 15
+  admin:                               # no defaults: missing config stops start-up (fail closed)
+    team-domain: ${CF_ACCESS_TEAM_DOMAIN}                     # https://<team>.cloudflareaccess.com
+    audience: ${CF_ACCESS_AUD}                                # AUD tag of this cell's admin Access app
+    allowed-service-tokens: ${CF_ACCESS_ALLOWED_CLIENT_IDS}   # comma-separated Client IDs
+    clock-skew: 30s
+  lease:
+    max-epoch-jump: 1000
+    max-ttl: 20m
+    default-max-cell-grant: 10000
 
 resilience4j:
   circuitbreaker:
