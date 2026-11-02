@@ -395,7 +395,20 @@ Don't use the root account in the terminal. Create a separate user:
 4. Open the user, go to **Security credentials**, and click **Create access key**.
 5. Choose **Command Line Interface (CLI)**. **Keep this page open.** The secret is shown only once.
 
-That key can do almost anything in your account, so treat it like a bank password.
+> **This key is the riskiest thing in this guide.** It can do almost anything in your account, it
+> doesn't expire, and `aws configure` saves it as plain text in `~/.aws/credentials`. Anyone who gets
+> it controls your AWS account. So:
+>
+> - Treat it like a bank password. Never paste it anywhere except `aws configure`, and never copy that
+>   file into the project folder or a backup.
+> - **Turn it off when you aren't deploying** (IAM → Users → `cloudbridge-admin` → Security credentials
+>   → Actions → Deactivate). Turn it back on when you need it, including before `budget-down`.
+> - If you think it has leaked, deactivate it first, then investigate.
+> - It's temporary. Week 5 adds short-lived logins for GitHub; delete this key when that's done.
+>
+> Why not something safer now? AWS's short-lived logins (IAM Identity Center) need AWS Organizations,
+> which moves a Free plan account to Paid. A narrower permission list would be safer, but nobody has
+> worked out and tested the exact list these stacks need yet. A wrong one fails partway through a deploy.
 
 ### 5.5 Connect the terminal to AWS
 
@@ -875,6 +888,7 @@ buckets, secrets and certificate stay, and cost only pennies.
 |---|---|
 | Cloudflare Load Balancing (US$5+/month) | It may keep billing after `budget-down`. Check **Billing → Subscriptions** in Cloudflare and cancel it if you're stopping for a while |
 | Domain | Renews yearly. Turn off auto-renew if you no longer want it |
+| AWS access key (a risk, not a cost) | Deactivate it after `budget-down` (see Part 5.4). Delete it if you're finished with AWS |
 
 ### Dates to put in your calendar
 
