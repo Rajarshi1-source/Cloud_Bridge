@@ -2,3 +2,9 @@
 management:
   server:
     port: 0               # random, so several test contexts can coexist
+cloudbridge:
+  admin:
+    host: admin-aws.example.test
+    team-domain: https://team.cloudflareaccess.test
+    audience: aud-aws
+    allowed-service-tokens: allocator-client-id

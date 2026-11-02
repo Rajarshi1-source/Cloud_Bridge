@@ -7,7 +7,9 @@
 # Runs on localhost against a directory that twin.sh mounts into the k3s container:
 #   ansible-playbook -i localhost, -c local playbooks/twin.yml -e cb_cell=cb-aws-local -e cb_cloud=aws \
 #     -e cb_ring=ring-main -e twin_dir=/twin/cb-aws-local -e twin_pki=/twin/pki \
-#     -e twin_git_url=http://172.29.80.6/git/cloud_bridge.git
+#     -e twin_git_url=http://172.29.80.6/git/cloud_bridge.git \
+#     -e cell_secrets_access_team_domain=http://172.29.80.7:443 \
+#     -e cell_secrets_access_aud=twin-admin -e cell_secrets_access_allowed_client_ids=twin-allocator.access
 - name: Render a local twin cell
   hosts: localhost
   gather_facts: false
@@ -19,6 +21,7 @@
     cell_secrets_dir: "{{ twin_dir }}/state"
     twin_revision: twin
     twin_mirror_url: http://twin-mirror:5000
+    twin_registry_url: http://twin-registry:5000
     origin_tls_pair:
       certificate: "{{ lookup('ansible.builtin.file', twin_pki ~ '/origin.crt') }}"
       private_key: "{{ lookup('ansible.builtin.file', twin_pki ~ '/origin.key') }}"
@@ -48,8 +51,10 @@
           private-registry: "/etc/rancher/k3s/twin/registries.yaml"
 
     # Stands in for the registries_mirror role: every docker.io pull of both cells goes through one
-    # cache, so a twin start costs each image one Docker Hub pull instead of one per cell.
-    - name: Send docker.io pulls through the twin's pull-through mirror
+    # cache, so a twin start costs each image one Docker Hub pull instead of one per cell. The twin's
+    # own registry comes first: containerd asks it for service images built from the working tree
+    # (twin.sh images) and moves on to the mirror for everything it answers 404 to.
+    - name: Send docker.io pulls through the twin's registry, then its pull-through mirror
       ansible.builtin.copy:
         dest: "{{ twin_dir }}/etc/registries.yaml"
         mode: "0600"
@@ -57,6 +62,7 @@
           mirrors:
             docker.io:
               endpoint:
+                - {{ twin_registry_url | to_json }}
                 - {{ twin_mirror_url | to_json }}
   roles:
     - cell_secrets

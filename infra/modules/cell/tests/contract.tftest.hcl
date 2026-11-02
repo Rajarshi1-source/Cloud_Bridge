@@ -95,6 +95,14 @@ run "aws_managed_contract" {
     condition     = output.cell.image_mirror == "111122223333.dkr.ecr.ap-south-1.amazonaws.com/dockerhub"
     error_message = "Managed AWS cells pull through the ECR pull-through cache."
   }
+  assert {
+    condition     = alltrue([for k in ["host", "port", "secret_ref"] : contains(keys(output.database), k)]) && alltrue([for k in ["host", "port", "tls"] : contains(keys(output.cache), k)])
+    error_message = "AWS managed data contract keys missing."
+  }
+  assert {
+    condition     = output.secret_store.kind == "aws" && output.secret_store.prefix == "cb-aws-test" && contains(keys(output.secret_store), "reader")
+    error_message = "A managed AWS cell exposes the store External Secrets reads."
+  }
 }
 
 run "gcp_managed_contract" {
@@ -112,6 +120,28 @@ run "gcp_managed_contract" {
   assert {
     condition     = output.cell.image_mirror == "asia-south1-docker.pkg.dev/cb-test/dockerhub"
     error_message = "Managed GCP cells pull through the Artifact Registry remote repository."
+  }
+  assert {
+    condition     = alltrue([for k in ["host", "port", "secret_ref"] : contains(keys(output.database), k)]) && alltrue([for k in ["host", "port", "tls"] : contains(keys(output.cache), k)])
+    error_message = "GCP managed data contract keys missing."
+  }
+  assert {
+    condition     = output.secret_store.kind == "gcp" && output.secret_store.prefix == "cb-gcp-test" && contains(keys(output.secret_store), "reader")
+    error_message = "A managed GCP cell exposes the store External Secrets reads."
+  }
+}
+
+run "managed_cache_toggle" {
+  command = plan
+  variables {
+    cloud         = "gcp"
+    profile       = "managed"
+    region        = "asia-south1"
+    managed_cache = false
+  }
+  assert {
+    condition     = output.database != null && output.cache == null
+    error_message = "managed_cache = false keeps the managed database and leaves Valkey in the cluster."
   }
 }
 
@@ -132,6 +162,10 @@ run "aws_budget_contract" {
   assert {
     condition     = output.cell.image_mirror == "docker.io" && output.cell.expires_at == null
     error_message = "Budget cells pull docker.io (k3s registry token) and never expire."
+  }
+  assert {
+    condition     = output.secret_store == null
+    error_message = "Budget cells get their Secrets from Ansible, not External Secrets."
   }
 }
 

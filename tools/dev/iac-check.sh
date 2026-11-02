@@ -11,7 +11,7 @@ ACTIONLINT_IMAGE=rhysd/actionlint:1.7.12
 TOOLBOX_IMAGE=cloudbridge/ansible-toolbox:local
 HELM_IMAGE=alpine/helm:4.2.4
 KUBECONFORM_IMAGE=ghcr.io/yannh/kubeconform:v0.7.0
-STACKS="modules/cell live/aws-budget/10-foundation live/gcp-budget/10-foundation live/aws-dev/10-foundation live/gcp-dev/10-foundation live/global/00-ci-identity live/global/20-origin-tls live/global/30-traffic"
+STACKS="modules/cell live/aws-budget/10-foundation live/gcp-budget/10-foundation live/aws-dev/10-foundation live/gcp-dev/10-foundation live/aws-dev/20-bootstrap live/gcp-dev/20-bootstrap live/global/00-ci-identity live/global/20-origin-tls live/global/30-traffic"
 docker volume create cb-tf-plugins >/dev/null
 docker volume create cb-tofu-plugins >/dev/null
 fail=0

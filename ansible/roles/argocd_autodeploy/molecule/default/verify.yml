@@ -29,7 +29,7 @@
       ansible.builtin.assert:
         that:
           - argocd_autodeploy_docs['00-cb-app-namespace.yaml'][0].metadata.labels['pod-security.kubernetes.io/enforce'] == 'restricted'
-          - argocd_autodeploy_docs['05-cell-secrets.yaml'] | map(attribute='metadata.name') | list == ['cell-db', 'cell-cache']
+          - argocd_autodeploy_docs['05-cell-secrets.yaml'] | map(attribute='metadata.name') | list == ['cell-db', 'cell-cache', 'cell-admin']
           - argocd_autodeploy_docs['05-cell-secrets.yaml'][0].stringData.password | length == 32
           - argocd_autodeploy_docs['06-origin-tls.yaml'][0].type == 'kubernetes.io/tls'
           - argocd_autodeploy_docs['10-argocd.yaml'][0].spec.version == '10.10.5'

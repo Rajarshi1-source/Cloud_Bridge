@@ -111,3 +111,13 @@ variable "dockerhub_user" {
   default     = null
   description = "GCP: Docker ID for the Artifact Registry remote repository's upstream credentials (token = latest version of Secret Manager secret cb-dockerhub-pull). Null pulls anonymously (rate-limited)."
 }
+
+variable "admin_access" {
+  type = object({
+    team_domain        = string
+    audience           = string
+    allowed_client_ids = string
+  })
+  default     = null
+  description = "Cloudflare Access values the origin checks the admin JWT against (global/30-traffic outputs). Managed cells only: until set, the gateway and inventory-service refuse to start."
+}

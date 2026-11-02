@@ -89,6 +89,11 @@ spec:
             {{- if .Values.cache }}
             - { name: VALKEY_URL, valueFrom: { secretKeyRef: { name: cell-cache, key: url } } }
             {{- end }}
+            {{- if .Values.adminAuth }}
+            - { name: CF_ACCESS_TEAM_DOMAIN, valueFrom: { secretKeyRef: { name: cell-admin, key: teamDomain } } }
+            - { name: CF_ACCESS_AUD, valueFrom: { secretKeyRef: { name: cell-admin, key: audience } } }
+            - { name: CF_ACCESS_ALLOWED_CLIENT_IDS, valueFrom: { secretKeyRef: { name: cell-admin, key: allowedClientIds } } }
+            {{- end }}
             {{- range $name, $value := .Values.env }}
             - { name: {{ $name }}, value: {{ tpl (toString $value) $ | quote }} }
             {{- end }}
@@ -122,6 +127,12 @@ metadata:
   name: {{ .Values.service }}
   labels:
     {{- include "cb-service.labels" . | nindent 4 }}
+  {{- if .Values.ingress.enabled }}
+  {{- with .Values.ingress.serviceAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
 spec:
   selector:
     app: {{ .Values.service }}
@@ -192,7 +203,8 @@ metadata:
 spec:
   ingressClassName: {{ required "ingress.className is set by the cell" .Values.ingress.className }}
   tls:
-    # Cloudflare Origin CA certificate (Full strict): written by Ansible origin_tls on budget cells.
+    # Cloudflare Origin CA certificate (Full strict): written by Ansible origin_tls on budget cells,
+    # by External Secrets on managed cells (the ALB finds it in ACM by these hosts instead).
     - secretName: origin-tls
       hosts:
         - app.{{ $domain }}

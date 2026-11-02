@@ -1,0 +1,4 @@
+apiVersion: v2
+name: cloudbridge-root
+description: The rendered root ApplicationSet, applied after Argo CD's CRDs exist.
+version: 1.0.0

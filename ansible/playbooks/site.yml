@@ -2,7 +2,8 @@
 # Configures the budget-profile VMs Terraform tagged cb-ansible-role = k3s_server, on both clouds,
 # then checks each origin answers /healthz/cell through its own ingress (bypassing Cloudflare).
 # Environment: CB_HOSTNAME (app.<domain>), DOCKERHUB_USER, CB_SSM_BUCKET (AWS), GCP_PROJECT_ID and
-# GCP_OSLOGIN_USER (GCP), plus cloud credentials for the inventories and secret lookups.
+# GCP_OSLOGIN_USER (GCP), CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD and CF_ACCESS_ALLOWED_CLIENT_IDS
+# (global/30-traffic outputs), plus cloud credentials for the inventories and secret lookups.
 - name: Configure budget-profile k3s cells
   hosts: all
   gather_facts: true

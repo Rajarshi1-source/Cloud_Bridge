@@ -61,6 +61,12 @@ cloudbridge:
   order-readiness-url: ${ORDER_READINESS_URL:http://localhost:9080/actuator/health/readiness}
   health:
     cache-ttl: 2s
+  admin:                               # no defaults: missing config stops start-up (fail closed)
+    host: ${CB_ADMIN_HOST}                                    # admin-aws.<domain>
+    team-domain: ${CF_ACCESS_TEAM_DOMAIN}                     # https://<team>.cloudflareaccess.com
+    audience: ${CF_ACCESS_AUD}                                # AUD tag of this cell's admin Access app
+    allowed-service-tokens: ${CF_ACCESS_ALLOWED_CLIENT_IDS}   # comma-separated Client IDs
+    clock-skew: 30s
   cors:
     allowed-origins: ${CB_CORS_ORIGINS:https://cp.example.invalid}
   rate-limit:

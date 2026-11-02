@@ -1,6 +1,15 @@
 ---
 # Budget cells keep Postgres on the VM's disk, so its password lives on the VM too: generated once,
 # never in Git, never seen by Argo CD. k3s applies the manifests it finds in its auto-deploy dir.
+- name: The admin API needs the Cloudflare Access values before anything is rendered
+  ansible.builtin.assert:
+    that:
+      - cell_secrets_access_team_domain | length > 0
+      - cell_secrets_access_aud | length > 0
+      - cell_secrets_access_allowed_client_ids | length > 0
+    fail_msg: Set CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD and CF_ACCESS_ALLOWED_CLIENT_IDS (global/30-traffic outputs)
+    quiet: true
+
 - name: Create the CloudBridge state directory
   ansible.builtin.file:
     path: "{{ cell_secrets_dir }}"
@@ -64,4 +73,15 @@
       type: Opaque
       stringData:
         url: "redis://valkey.cb-app.svc:6379"
+      ---
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cell-admin
+        namespace: cb-app
+      type: Opaque
+      stringData:
+        teamDomain: {{ cell_secrets_access_team_domain | to_json }}
+        audience: {{ cell_secrets_access_aud | to_json }}
+        allowedClientIds: {{ cell_secrets_access_allowed_client_ids | to_json }}
   no_log: true

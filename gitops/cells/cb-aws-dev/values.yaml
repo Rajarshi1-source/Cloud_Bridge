@@ -1,0 +1,26 @@
+# The ONLY per-cloud app config. Allowed to differ between cells: cell, cloud, ingress class and
+# annotations, imageRegistryMirror, secretStore, network sources, and the replica floors and data of
+# this ephemeral profile. Anything else is parity drift.
+cell: cb-aws-dev
+cloud: aws
+imageRegistryMirror: docker.io    # or terraform output cell.image_mirror once the mirror is enabled
+secretStore: external-secrets (from AWS Secrets Manager)
+externalSecrets:
+  enabled: true
+  provider: aws
+  region: ap-south-1
+  originTlsKey: cb/origin-tls
+ingress:
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz/cell
+    alb.ingress.kubernetes.io/healthcheck-port: traffic-port
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+network:
+  ingressCidrs: [10.20.0.0/16]    # the ALB reaches pod IPs from inside the VPC
+# Same replica floors as production charts, in-cluster data (ephemeral: nothing to keep).
+budgetData:
+  enabled: true

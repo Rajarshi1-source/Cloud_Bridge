@@ -57,3 +57,14 @@ variable "dockerhub_user" {
   type    = string
   default = null
 }
+
+# Set per run (TF_VAR_admin_access) from the global/30-traffic outputs. Until it is set, the cell's
+# gateway and inventory-service refuse to start.
+variable "admin_access" {
+  type = object({
+    team_domain        = string
+    audience           = string
+    allowed_client_ids = string
+  })
+  default = null
+}

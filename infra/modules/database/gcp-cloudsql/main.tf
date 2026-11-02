@@ -55,8 +55,9 @@ resource "google_secret_manager_secret" "db" {
 }
 
 resource "google_secret_manager_secret_version" "db" {
-  secret      = google_secret_manager_secret.db.id
-  secret_data = random_password.admin.result
+  secret = google_secret_manager_secret.db.id
+  # {username, password}, the same shape as the RDS secret, so one ExternalSecret reads both.
+  secret_data = jsonencode({ username = "cell_admin", password = random_password.admin.result })
 }
 
 resource "google_sql_database_instance" "this" {

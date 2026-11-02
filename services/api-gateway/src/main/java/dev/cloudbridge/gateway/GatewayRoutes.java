@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.servlet.function.RequestPredicate;
 import org.springframework.web.servlet.function.RouterFunction;
 import org.springframework.web.servlet.function.ServerResponse;
 
@@ -25,8 +26,8 @@ import static org.springframework.web.servlet.function.RequestPredicates.GET;
 import static org.springframework.web.servlet.function.RequestPredicates.POST;
 
 /**
- * Public routes, in Java so the compiler checks them. Only routes listed here are reachable:
- * internal endpoints (POST /reservations, /admin/**) are never routed from the public host.
+ * Routes, in Java so the compiler checks them. Only routes listed here are reachable: internal
+ * endpoints (POST /reservations, /admin/**) are never routed from the public host.
  * The gateway retries GETs only; clients retry POST /orders under the same Idempotency-Key
  * (IdempotencyKeyGuard rejects a POST without one before it gets here).
  */
@@ -61,6 +62,21 @@ class GatewayRoutes {
 				.setMethods(Set.of(HttpMethod.GET))
 				.setSeries(Set.of(HttpStatus.Series.SERVER_ERROR))
 				.setBackoff(Duration.ofMillis(50), Duration.ofMillis(400), 2)))
+			.build();
+	}
+
+	/**
+	 * Admin host only. Cf-Access-Jwt-Assertion is forwarded unchanged because inventory-service
+	 * validates it again. No breaker or retry: the allocator retries on its next cycle.
+	 */
+	@Bean
+	RouterFunction<ServerResponse> adminRoutes(@Value("${cloudbridge.inventory-url}") String inventoryUrl,
+			@Value("${cloudbridge.admin.host}") String adminHost) {
+		// The hostname alone, as SecurityConfig compares it; the gateway's host() predicate compares the whole Host header, port included.
+		RequestPredicate onAdminHost = (request) -> adminHost.equalsIgnoreCase(request.servletRequest().getServerName());
+		return route("admin-leases")
+			.route(onAdminHost.and(POST("/admin/leases/grant").or(GET("/admin/leases/report"))), http())
+			.before(uri(inventoryUrl))
 			.build();
 	}
 

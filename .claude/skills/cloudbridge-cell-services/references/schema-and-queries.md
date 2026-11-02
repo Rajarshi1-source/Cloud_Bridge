@@ -208,15 +208,15 @@ UPDATE inventory.inventory_lease l
  WHERE l.sku = p.sku;
 
 -- I4. Apply a lease grant from the allocator — fencing: only a strictly newer epoch wins.
-INSERT INTO inventory.inventory_lease (sku, granted_qty, sold_qty, lease_epoch, expires_at)
-VALUES (:sku, :granted, 0, :epoch, :expires_at)
+INSERT INTO inventory.inventory_lease AS l (sku, granted_qty, sold_qty, lease_epoch, expires_at)
+VALUES (:sku, :reported_sold + :remaining, 0, :epoch, :expires_at)
 ON CONFLICT (sku) DO UPDATE
-   SET granted_qty = EXCLUDED.granted_qty + inventory.inventory_lease.sold_qty,  -- grant is for *remaining* stock
+   SET granted_qty = GREATEST(l.sold_qty, EXCLUDED.granted_qty),  -- computed from the sold_qty the allocator saw
        lease_epoch = EXCLUDED.lease_epoch,
        expires_at  = EXCLUDED.expires_at,
        updated_at  = now()
- WHERE inventory.inventory_lease.lease_epoch < EXCLUDED.lease_epoch
-RETURNING lease_epoch;
+ WHERE l.lease_epoch < EXCLUDED.lease_epoch
+RETURNING lease_epoch, granted_qty;
 -- 0 rows → stale grant (older epoch) → reject with 409 and log: that's the fence working
 
 -- I5. Renewal report sent to the allocator every 5 min.
@@ -227,18 +227,11 @@ SELECT sku, greatest(granted_qty - sold_qty, 0) AS sellable_in_cell, expires_at 
 FROM inventory.inventory_lease WHERE sku = :sku;
 ```
 
-### Why `granted_qty + sold_qty` in I4
-The allocator grants the quantity the cell may **still** sell. Storing `granted_qty` as a running total keeps the `CHECK (sold_qty <= granted_qty)` invariant meaningful across renewals without resetting `sold_qty` (which would lose the audit trail). Explain this choice in a code comment; it is the kind of detail interviewers probe.
+### Why a running total, from the reported sold, in I4
+The allocator grants the quantity the cell may **still** sell. Storing `granted_qty` as a running total keeps the `CHECK (sold_qty <= granted_qty)` invariant meaningful across renewals without resetting `sold_qty` (which would lose the audit trail). The total starts from the `sold_qty` the allocator saw in its report, not the current one, so sales made while the grant travelled come out of the grant instead of adding to it; `GREATEST` keeps the CHECK true when the cell already sold past the new total. Explain this choice in a code comment; it is the kind of detail interviewers probe.
 
 ## Roles
 
-```sql
-CREATE ROLE order_svc LOGIN;        GRANT USAGE ON SCHEMA orders TO order_svc;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA orders TO order_svc;
-CREATE ROLE inventory_svc LOGIN;    GRANT USAGE ON SCHEMA inventory TO inventory_svc;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA inventory TO inventory_svc;
-CREATE ROLE parity_reader LOGIN;    -- used by the parity checker for flyway_schema_history only
-GRANT USAGE ON SCHEMA orders, inventory TO parity_reader;
-GRANT SELECT ON orders.flyway_schema_history, inventory.flyway_schema_history TO parity_reader;
-```
-(The `flyway_schema_history` tables exist after the first migration; run the grants in a later migration or an `afterMigrate` callback.)
+Migrations `order-service/V2__roles.sql` and `inventory-service/V3__roles.sql` create `order_svc`, `inventory_svc`, `parity_reader` and `health_reader`. Roles are per Postgres cluster and both services migrate at once, so each `CREATE ROLE` tolerates `duplicate_object` and `unique_violation`. The service roles get DML on their own schema (and future tables, via default privileges) but no write on `flyway_schema_history`; `parity_reader` reads only `flyway_schema_history`; `health_reader` reads nothing and only runs `SELECT 1`.
+
+**Not wired yet:** the roles have no password, so nothing logs in as them, and services still use the owner credentials from `cell-db`. Using them needs per-role passwords in the cell's secret tooling, and a separate owner credential for Flyway.

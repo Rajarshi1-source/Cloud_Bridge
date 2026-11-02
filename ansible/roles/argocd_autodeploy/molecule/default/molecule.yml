@@ -14,6 +14,9 @@ provisioner:
       all:
         cb_cell: cb-gcp-test
         cb_ring: ring-canary
+        cell_secrets_access_team_domain: https://team.cloudflareaccess.test
+        cell_secrets_access_aud: aud-test
+        cell_secrets_access_allowed_client_ids: allocator-client-id
         cb_secret_backend: gcp
         cb_k3s_manifests_dir: /var/lib/rancher/k3s/server/manifests
         argocd_autodeploy_appset_template: "${MOLECULE_PROJECT_DIRECTORY}/../../../gitops/bootstrap/applicationset.yaml.tftpl"

@@ -25,3 +25,7 @@ output "cache" {
   value     = local.cache
   sensitive = true
 }
+
+output "secret_store" {
+  value = local.secret_store
+}

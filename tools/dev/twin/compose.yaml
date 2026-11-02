@@ -10,7 +10,7 @@ x-cell: &cell
   tmpfs: [/run, /var/run]
   restart: unless-stopped
   mem_limit: ${CB_TWIN_CELL_MEM:-3g}       # a budget VM has 2 GiB; headroom for k3s-in-Docker
-  depends_on: [twin-mirror, twin-git]
+  depends_on: [twin-registry, twin-mirror, twin-git]
 
 services:
   cell-aws:
@@ -50,6 +50,69 @@ services:
       - ${TWIN_DIR}/edge:/dynamic:ro
       - ${TWIN_DIR}/pki:/pki:ro
     restart: unless-stopped
+    networks:
+      twin:
+        aliases:                    # the allocator calls each cell's admin host, as it would in production
+          - admin-aws.${CB_TWIN_DOMAIN:-cloudbridge.example}
+          - admin-gcp.${CB_TWIN_DOMAIN:-cloudbridge.example}
+
+  # Stands in for Cloudflare Access: turns a service token into the signed JWT the cells validate, and
+  # serves the signing keys. Reuses the toolbox image for its Python and cryptography. Port 443 (plain
+  # HTTP) so the cells' NetworkPolicy has the same shape as for the real team domain. Pods reach it by IP.
+  twin-access:
+    image: cloudbridge/ansible-toolbox:local
+    command: [python3, -I, /app/access_standin.py]
+    environment:
+      ACCESS_ISSUER: http://${CB_TWIN_NET:-172.29.80}.7:443
+      ACCESS_AUD: twin-admin
+      ACCESS_ADMIN_HOSTS: admin-aws.${CB_TWIN_DOMAIN:-cloudbridge.example},admin-gcp.${CB_TWIN_DOMAIN:-cloudbridge.example}
+    volumes:
+      - ./access_standin.py:/app/access_standin.py:ro
+      - ${TWIN_DIR}/access:/access
+    restart: unless-stopped
+    networks:
+      twin:
+        ipv4_address: ${CB_TWIN_NET:-172.29.80}.7
+
+  # The control plane's lease allocator and its tables, with short leases so a drill takes minutes.
+  twin-cp-db:
+    image: postgres:18.4-alpine
+    environment:
+      POSTGRES_USER: allocator
+      POSTGRES_PASSWORD: allocator
+      POSTGRES_DB: allocator
+    volumes:
+      - cp-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U allocator"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [twin]
+
+  twin-allocator:
+    build: ../../../control-plane/allocator
+    image: cloudbridge/allocator:local
+    env_file:
+      - path: ${TWIN_DIR}/access/allocator.env
+        required: false
+    environment:
+      ALLOCATOR_DATABASE_URL: postgresql://allocator:allocator@twin-cp-db:5432/allocator
+      ALLOCATOR_CELLS: '{"aws": "https://admin-aws.${CB_TWIN_DOMAIN:-cloudbridge.example}:8443", "gcp": "https://admin-gcp.${CB_TWIN_DOMAIN:-cloudbridge.example}:8443"}'
+      ALLOCATOR_WEIGHTS_FILE: /weights/terraform.tfvars.json
+      ALLOCATOR_INTERVAL_SECONDS: "20"
+      ALLOCATOR_LEASE_TTL_SECONDS: "90"
+      ALLOCATOR_MARGIN_SECONDS: "60"
+      ALLOCATOR_SEED_STOCK: SKU-1=1000,SKU-2=20
+      SSL_CERT_FILE: /pki/ca.crt
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../../../infra/live/global/30-traffic:/weights:ro
+      - ${TWIN_DIR}/pki:/pki:ro
+    depends_on:
+      twin-cp-db:
+        condition: service_healthy
+    restart: unless-stopped
     networks: [twin]
 
   # Argo CD in both cells follows a snapshot of this working tree (branch "twin"), so changes are
@@ -78,6 +141,15 @@ services:
       twin:
         ipv4_address: ${CB_TWIN_NET:-172.29.80}.6
 
+  # Service images built from the working tree (twin.sh images). Cells try it before the mirror.
+  twin-registry:
+    image: registry:3.0.0
+    ports: ["127.0.0.1:${CB_TWIN_REGISTRY_PORT:-5500}:5000"]
+    volumes:
+      - registry:/var/lib/registry
+    restart: unless-stopped
+    networks: [twin]
+
   # One Docker Hub pull per image for both cells (the registries_mirror role's job on the VMs).
   twin-mirror:
     image: registry:3.0.0
@@ -94,8 +166,13 @@ networks:
     ipam:
       config:
         - subnet: ${CB_TWIN_NET:-172.29.80}.0/24
+          # Dynamic addresses stay out of the low range: after a Docker restart a container without a
+          # fixed address could otherwise take .6 or .7 and keep twin-git or twin-access from starting.
+          ip_range: ${CB_TWIN_NET:-172.29.80}.128/25
 
 volumes:
   cell-aws:
   cell-gcp:
   mirror:
+  registry:
+  cp-db:

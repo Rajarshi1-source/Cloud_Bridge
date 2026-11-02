@@ -423,6 +423,14 @@ The order follows Rev 2 §4.3 and ships first: **a public multi-cloud link by th
   - Authenticates with the Access service token.
   - Unit tests: sum of grants ≤ stock; no regrant before expiry + margin.
 - **Done when:** an order survives pod restarts; a duplicate POST with the same key returns the same order; and a forged grant without a token gets a 401/404 from outside.
+- **Status (2 Nov 2026):** "done when" verified on the local twin (`tools/dev/twin.sh leases`, results in `docs/runbooks/local-twin.md`), not on a cloud. What changed from the plan above:
+  - **Grant contract.** Grants carry `reportedSold` and answer `grantedQty`, and the cell computes `GREATEST(sold_qty, reportedSold + remainingQty)`. A randomized allocator test oversold without them: sales after the report were added on top of the grant, and a cell that sold past a shrink kept those sales while the other cell was granted as if it hadn't.
+  - **Names.** The migration is `V2__lease_admin_hardening.sql`. The Access AUD is one per zone (one Access application in `30-traffic`), delivered in the `cell-admin` Secret.
+  - **Cells sell nothing until granted.** `R__catalog.sql` seeds products everywhere; only the `local` profile seeds leases. The allocator's real-cloud deployment is the control-plane VM (Week 6), so **once these images are released, real cells refuse orders until then**, and they need `cell-admin`, or the gateway and inventory-service refuse to start.
+  - **Go-live order.** `30-traffic` now applies before `make configure`, because the cells need its Access audience. Budget cells have `replicas.max: 1` (see the twin runbook).
+  - **Not wired.** Migrations create `order_svc`, `inventory_svc`, `parity_reader` and `health_reader` without passwords. Services still use the owner credentials.
+  - **Never run on a cloud.** RDS, Cloud SQL, ElastiCache, Memorystore, External Secrets, `20-bootstrap`, the ALB and GCE ingress, and real Access JWTs (claim names included). The TTL reaper destroys only `10-foundation`, so an ALB left by `20-bootstrap` could block a VPC destroy. The AWS managed origin for `30-traffic` is still set by hand.
+  - **Known limit, a product decision.** After expiry + margin an unreachable cell counts only its last-reported sold. If just the allocator was partitioned and the cell kept selling until expiry, the total can exceed stock by those sales; `STOCK OVERRUN` is logged when the cell returns. The strict alternative is never to re-grant until the cell reports, which strands stock for the whole outage.
 
 ### Week 5: CI/CD hardening and observability (iac-pipeline, observability-dashboard)
 

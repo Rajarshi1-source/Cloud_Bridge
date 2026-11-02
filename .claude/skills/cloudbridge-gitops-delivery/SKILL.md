@@ -86,6 +86,8 @@ One Argo CD per cell, each pulling from Git. A hub Argo CD would need cluster-ad
 
 ## Local twin (no cloud account)
 
+Service code from the working tree: `tools/dev/twin.sh images` builds the three images into the twin's own registry and overlays their digests on the ring files in the twin's snapshot only (`images off` returns to the rings); `twin.sh promote` then replaces the old pods, which do not fit alongside the new ones. `twin.sh leases` is Week 4's end-to-end check, with an Access stand-in in front of the admin hosts and the real allocator. Managed cells (`cb-<cloud>-dev`) get their Secrets from External Secrets and their ingress from ALB or GCE, both added by `platform-addons`.
+
 `tools/dev/twin.sh up` runs `cb-aws-local` and `cb-gcp-local`: two k3s v1.36 containers built by the budget roles (`ansible/playbooks/twin.yml` → `cell_secrets`, `origin_tls`, `argocd_autodeploy`, plus the `k3s_server` config template), each with its own Argo CD following the same ApplicationSet, charts and ring files. A Traefik edge reproduces the Cloudflare LB from `terraform.tfvars.json` (pool weights, `__cflb` cookie, `/healthz/cell` monitor, fallback cell, Full strict). Rules:
 - `gitops/cells/cb-<cloud>-local/values.yaml` stays identical to `cb-<cloud>-budget` except `cell` and `secretStore`; otherwise the twin proves nothing about the budget cell.
 - Argo CD in the twin follows a snapshot of the working tree (`twin` branch on the twin's git server), so chart and values changes are tested before a push; `twin.sh sync` republishes.
