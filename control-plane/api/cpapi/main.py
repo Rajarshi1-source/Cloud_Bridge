@@ -62,7 +62,7 @@ def now() -> datetime:
 
 
 def env_of(conn, cell: str) -> str:
-    row = conn.execute("SELECT env FROM cells WHERE id = %s", (cell,)).fetchone() if CELL_RE.match(cell) else None
+    row = conn.execute("SELECT env FROM cells WHERE id = %s", (cell,)).fetchone() if CELL_RE.fullmatch(cell) else None
     if row is None:
         raise HTTPException(404, f"unknown cell {cell!r}")
     return row[0]

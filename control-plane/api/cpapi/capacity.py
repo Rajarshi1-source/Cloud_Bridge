@@ -10,6 +10,7 @@ evacuation cascades.
 from __future__ import annotations
 
 import math
+import os
 import pathlib
 
 import yaml
@@ -25,8 +26,17 @@ def _yaml(path: pathlib.Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
+def _cell_dir(repo: pathlib.Path, cell: str) -> pathlib.Path:
+    """The cell's directory. The name comes from a URL, so it is never trusted to stay under gitops/cells."""
+    base = os.path.normpath(repo / "gitops" / "cells")
+    path = os.path.normpath(os.path.join(base, cell))
+    if not path.startswith(base + os.sep):
+        raise NotMeasured(f"{cell!r} is not a cell")
+    return pathlib.Path(path)
+
+
 def measured(repo: pathlib.Path, cell: str) -> dict:
-    path = repo / "gitops" / "cells" / cell / "capacity.yaml"
+    path = _cell_dir(repo, cell) / "capacity.yaml"
     if not path.exists():
         raise NotMeasured(f"{cell} has no capacity.yaml: its capacity was never measured")
     return _yaml(path)
@@ -34,7 +44,7 @@ def measured(repo: pathlib.Path, cell: str) -> dict:
 
 def hpa_max(repo: pathlib.Path, cell: str, service: str) -> int:
     chart = _yaml(repo / "gitops" / "charts" / service / "values.yaml")
-    values = repo / "gitops" / "cells" / cell / "values.yaml"
+    values = _cell_dir(repo, cell) / "values.yaml"
     override = (_yaml(values).get("replicas") or {}).get("max") if values.exists() else None
     return int(override if override is not None else chart["replicas"]["max"])
 

@@ -4,6 +4,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -61,6 +62,31 @@ class Capacity(unittest.TestCase):
         self.assertEqual((plan["inventory-service"]["min_replicas"], plan["inventory-service"]["shortfall_replicas"]), (2, 10))
 
 
+class CellFiles(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = pathlib.Path(tmp.name)
+        (self.repo / "gitops" / "cells" / "cb-aws-x").mkdir(parents=True)
+        (self.repo / "gitops" / "charts" / "order-service").mkdir(parents=True)
+        (self.repo / "gitops" / "cells" / "cb-aws-x" / "capacity.yaml").write_text("measuredAt: then\n")
+        (self.repo / "gitops" / "cells" / "cb-aws-x" / "values.yaml").write_text("replicas: {max: 9}\n")
+        (self.repo / "gitops" / "charts" / "order-service" / "values.yaml").write_text("replicas: {max: 4}\n")
+        (self.repo / "gitops" / "capacity.yaml").write_text("measuredAt: outside\n")
+        (self.repo / "gitops" / "values.yaml").write_text("replicas: {max: 99}\n")
+
+    def test_a_cell_reads_its_own_files(self):
+        self.assertEqual(cap.measured(self.repo, "cb-aws-x"), {"measuredAt": "then"})
+        self.assertEqual(cap.hpa_max(self.repo, "cb-aws-x", "order-service"), 9)
+
+    def test_a_name_cannot_leave_the_cells_directory(self):
+        for name in ("..", "../", "cb-aws-x/../..", str(self.repo / "gitops")):
+            with self.subTest(name), self.assertRaises(cap.NotMeasured):
+                cap.measured(self.repo, name)
+            with self.subTest(name), self.assertRaises(cap.NotMeasured):
+                cap.hpa_max(self.repo, name, "order-service")
+
+
 class Conn:
     """Answers env_of and nothing else."""
 
@@ -76,6 +102,9 @@ class Routes(unittest.TestCase):
         main.app.dependency_overrides[main.db] = lambda: Conn()
         self.addCleanup(main.app.dependency_overrides.clear)
         self.client = TestClient(main.app)
+
+    def test_a_cell_name_with_a_trailing_newline_is_unknown(self):
+        self.assertEqual(self.client.get("/capacity/cb-aws-x%0A", headers=HEADERS).status_code, 404)
 
     def test_every_route_but_health_needs_the_token(self):
         open_routes = {"/healthz", "/metrics"}
