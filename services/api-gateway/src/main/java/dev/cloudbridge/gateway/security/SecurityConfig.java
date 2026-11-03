@@ -75,7 +75,8 @@ class SecurityConfig {
 				.authenticationEntryPoint((req, res, ex) -> res.sendError(HttpServletResponse.SC_NOT_FOUND))
 				.accessDeniedHandler((req, res, ex) -> res.sendError(HttpServletResponse.SC_NOT_FOUND)))
 			.sessionManagement((s) -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-			.csrf((c) -> c.ignoringRequestMatchers(PATHS.matcher(HttpMethod.POST, "/orders"))) // no cookie-based auth
+			.csrf((c) -> c.csrfTokenRepository(new StatelessCsrfTokenRepository())
+				.ignoringRequestMatchers(PATHS.matcher(HttpMethod.POST, "/orders"))) // no cookie-based auth
 			.cors(Customizer.withDefaults()) // CorsConfigurationSource bean in CorsConfig
 			.headers((h) -> h.contentTypeOptions(Customizer.withDefaults()));
 		return http.build();
