@@ -85,3 +85,31 @@
         audience: {{ cell_secrets_access_aud | to_json }}
         allowedClientIds: {{ cell_secrets_access_allowed_client_ids | to_json }}
   no_log: true
+
+- name: Service token the Prometheus agent pushes metrics with
+  ansible.builtin.copy:
+    dest: "{{ cb_k3s_manifests_dir }}/06-metrics-writer.yaml"
+    mode: "0600"
+    content: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: monitoring
+        labels:
+          pod-security.kubernetes.io/enforce: restricted
+          pod-security.kubernetes.io/enforce-version: latest
+      ---
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: metrics-writer
+        namespace: monitoring
+      type: Opaque
+      stringData:
+        client-id: {{ cell_secrets_metrics_client_id | to_json }}
+        client-secret: {{ cell_secrets_metrics_client_secret | to_json }}
+      {% if cell_secrets_metrics_ca | length > 0 %}
+        ca.crt: {{ cell_secrets_metrics_ca | to_json }}
+      {% endif %}
+  when: cell_secrets_metrics_client_id | length > 0
+  no_log: true

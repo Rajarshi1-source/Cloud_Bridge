@@ -1,10 +1,16 @@
-# Per-pod RPS at p95 < 300 ms and errors < 0.5%, measured with k6 against this cell (Week 5).
-# Not measured yet: the capacity check refuses to evacuate into a cell whose numbers are 0.
-measuredAt: null
+# Per-pod RPS at p95 < 300 ms and errors < 0.5%, measured with k6 against this cell.
+# Written by tools/load/measure_capacity.py; don't edit by hand. Measured on this cell's own hardware:
+# it says nothing about another cell. Non-bottleneck services' numbers are lower bounds.
+measuredAt: "2026-11-03T07:20:07Z"
+measuredWith:
+  gatewayRps: 20
+  p95Ms: 29
+  errorRate: 0.0000
+  orderShare: 0.2
 perPodRps:
-  api-gateway: 0
-  order-service: 0
-  inventory-service: 0
-fanout:                   # downstream calls per gateway request
-  order-service: 1
-  inventory-service: 2
+  api-gateway: 20.2
+  order-service: 3.9
+  inventory-service: 23.7
+fanout:                   # downstream calls per gateway request, as measured
+  order-service: 0.19
+  inventory-service: 1.17

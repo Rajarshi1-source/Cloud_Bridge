@@ -159,7 +159,7 @@ spec:
   minReplicas: {{ .Values.replicas.min }}
   # Sized so this cell can take 100% of traffic:
   #   maxReplicas = ceil(1.2 × peak_gateway_rps_all_cells × fanout / per_pod_rps)
-  # per_pod_rps is not measured yet (k6, Week 5): see gitops/cells/<cell>/capacity.yaml.
+  # per_pod_rps is measured by tools/load/measure_capacity.py: see gitops/cells/<cell>/capacity.yaml.
   maxReplicas: {{ .Values.replicas.max }}
   metrics:
     - type: Resource

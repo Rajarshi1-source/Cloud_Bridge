@@ -1,0 +1,128 @@
+{{- /*
+The cell's Prometheus runs in agent mode: it scrapes this cell and pushes outbound to the central
+receiver through Cloudflare Access, so nothing reaches into a cell. The Access service token (and, on
+the twin, the edge's CA) comes from the metrics-writer Secret; a budget VM gets it from Ansible.
+*/ -}}
+{{- if .Values.observability.enabled }}
+{{- $o := .Values.observability -}}
+{{- $ns := .Values.network.monitoringNamespace -}}
+{{- $config := include "platform-addons.agentConfig" . -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: no-ingress
+  namespace: {{ $ns }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-agent
+  namespace: {{ $ns }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cb-prometheus-agent
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cb-prometheus-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cb-prometheus-agent
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-agent
+    namespace: {{ $ns }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-agent
+  namespace: {{ $ns }}
+data:
+  prometheus.yml: |
+    {{- $config | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-agent
+  namespace: {{ $ns }}
+  labels:
+    app: prometheus-agent
+    cb-cell: {{ required "cell is set by the cell values" .Values.cell }}
+spec:
+  replicas: 1
+  strategy: { type: Recreate }        # one writer per WAL
+  selector:
+    matchLabels: { app: prometheus-agent }
+  template:
+    metadata:
+      labels: { app: prometheus-agent }
+      annotations:
+        checksum/config: {{ $config | sha256sum }}
+    spec:
+      serviceAccountName: prometheus-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      {{- with $o.remoteWrite.edgeIp }}
+      hostAliases:                    # the twin's edge has no public DNS name
+        - ip: {{ . | quote }}
+          hostnames: [{{ printf "metrics.%s" $.Values.domain | quote }}]
+      {{- end }}
+      containers:
+        - name: prometheus
+          image: {{ $o.image }}
+          args:
+            - --agent
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.agent.path=/wal
+            - --storage.agent.retention.max-time=2h   # rides out a short outage of the receiver
+          env:
+            - { name: GOMEMLIMIT, value: {{ $o.goMemLimit | quote }} }
+          ports: [{ name: web, containerPort: 9090 }]
+          readinessProbe:
+            httpGet: { path: /-/ready, port: web }
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: web }
+            periodSeconds: 30
+          resources:
+            {{- toYaml $o.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus, readOnly: true }
+            - { name: writer, mountPath: /etc/metrics-writer, readOnly: true }
+            - { name: wal, mountPath: /wal }
+      volumes:
+        - name: config
+          configMap: { name: prometheus-agent }
+        - name: writer
+          secret: { secretName: metrics-writer }
+        - name: wal
+          emptyDir: { sizeLimit: {{ $o.walSizeLimit }} }
+{{- end }}

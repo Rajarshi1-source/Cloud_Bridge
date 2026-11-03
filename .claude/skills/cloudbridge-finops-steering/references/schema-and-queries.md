@@ -1,6 +1,6 @@
 # Control-Plane Schema & Queries (PostgreSQL 18)
 
-Applied with Flyway from `control-plane/migrations/`. The control-plane DB is separate from each cell's DB (cell schema lives in cloudbridge-cell-services).
+Extracted to `control-plane/migrations/V1`–`V6` in Week 5 (`V7__roles.sql` adds `cp_reader` and `cp_writer`), so Grafana's panels read real, empty tables. Applied with Flyway from `control-plane/migrations/`. The control-plane DB is separate from each cell's DB (cell schema lives in cloudbridge-cell-services).
 
 ## Contents
 1. Types, cells, services

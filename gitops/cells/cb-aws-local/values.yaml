@@ -1,7 +1,8 @@
 # Local twin of cb-aws-budget (tools/dev/twin.sh): the same k3s, charts and ring on this machine, so
 # Weeks 4-8 can be exercised without a cloud account. It must stay identical to cb-aws-budget except
-# for cell, the comments, secretStore and the Access stand-in's address in network.accessCidrs:
-# anything else would make the twin prove nothing.
+# for cell, the comments, secretStore, the Access stand-in's address in network.accessCidrs and
+# observability (on here, before the real central receiver exists): anything else would make the twin
+# prove nothing.
 cell: cb-aws-local
 cloud: aws
 # k3s pulls docker.io through the twin's pull-through mirror (registries.yaml written by twin.yml).
@@ -14,6 +15,12 @@ network:
   accessCidrs: [172.29.80.7/32]   # twin-access in tools/dev/twin/compose.yaml, instead of Cloudflare
 budgetData:
   enabled: true
+observability:
+  enabled: true
+  remoteWrite:
+    edgePort: "8443"
+    edgeIp: 172.29.80.8       # edge in tools/dev/twin/compose.yaml
+    caFile: /etc/metrics-writer/ca.crt
 # Same 2 GiB budget sizing as the cloud cell, so the twin catches a cell that no longer fits.
 # One JVM per service: starting pegs its CPU, so the HPA would add a second replica of everything
 # at every restart, and they don't fit (the twin's cell ran out of memory and looped).

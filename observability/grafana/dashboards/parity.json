@@ -1,0 +1,232 @@
+{
+  "description": "Are the cells still interchangeable?",
+  "editable": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "The newest snapshot's score: 1.0 means every check matched. Unknown never counts as a match.",
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "noValue": "no measurement yet",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "SELECT taken_at AS \"time\", score FROM parity_snapshots ORDER BY taken_at DESC LIMIT 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Latest parity score",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "When the parity check last ran.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "dateTimeAsIso"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT extract(epoch FROM max(taken_at)) * 1000 AS at FROM parity_snapshots",
+          "refId": "A"
+        }
+      ],
+      "title": "Snapshot as of",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "One point per parity run.",
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "noValue": "no measurement yet"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 3,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "SELECT taken_at AS \"time\", env AS metric, score FROM parity_snapshots WHERE $__timeFilter(taken_at) ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Score over time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "Checks that diverged or couldn't be read in the last two days; taken_at is the snapshot's time.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 4,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT DISTINCT ON (s.env, f.check_id) s.env, f.check_id, f.status, f.cell_values, s.taken_at FROM parity_findings f JOIN parity_snapshots s ON s.id = f.snapshot_id WHERE f.status IN ('diverged', 'unknown') AND s.taken_at > now() - interval '2 days' ORDER BY s.env, f.check_id, s.taken_at DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Current divergences",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "From the last day's snapshots. An expired exception fails the check.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 5,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT s.env, f.check_id, f.exception_expires FROM parity_findings f JOIN parity_snapshots s ON s.id = f.snapshot_id WHERE f.status = 'excepted' AND f.exception_expires <= current_date + 7 AND s.taken_at > now() - interval '1 day'",
+          "refId": "A"
+        }
+      ],
+      "title": "Exceptions expiring within 7 days",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": [
+    "cloudbridge"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Parity",
+  "uid": "cb-parity"
+}

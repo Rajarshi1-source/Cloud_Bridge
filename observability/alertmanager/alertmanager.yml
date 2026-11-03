@@ -1,0 +1,27 @@
+# CellSLOBurnFast also goes to Event-Driven Ansible, whose rulebook decides by cb_env (prod only ever
+# proposes). The Slack webhook URL is a mounted file, never in Git.
+route:
+  receiver: slack
+  group_by: [alertname, cb_cell]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - alertname="CellSLOBurnFast"
+      receiver: slack-and-eda
+
+receivers:
+  - name: slack
+    slack_configs:
+      - api_url_file: /etc/alertmanager/slack_url
+        channel: "#cloudbridge-alerts"
+        send_resolved: true
+  - name: slack-and-eda
+    slack_configs:
+      - api_url_file: /etc/alertmanager/slack_url
+        channel: "#cloudbridge-alerts"
+        send_resolved: true
+    webhook_configs:
+      - url: http://eda:5000/endpoint
+        send_resolved: true

@@ -1,0 +1,33 @@
+# The central receiver: run with --web.enable-remote-write-receiver. Cells push; nothing here reaches
+# into a cell. The edge address it probes lives in targets/*.yml, one line per environment.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # The probe goes through the edge, as a user does.
+  - job_name: blackbox-edge
+    metrics_path: /probe
+    params:
+      module: [http_2xx_cell]
+    file_sd_configs:
+      - files: ["targets/*.yml"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]

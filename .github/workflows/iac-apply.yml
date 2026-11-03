@@ -1,0 +1,68 @@
+# A merge to main plans each affected stack, and each plan then waits in that stack's environment for a
+# reviewer. Order: foundation (GCP, then AWS: the smaller cell first, like the release ring), then
+# traffic. Merging a change does not apply it; the approval does.
+name: iac-apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "gitops/global/values.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      foundation: ${{ steps.a.outputs.foundation }}
+      traffic: ${{ steps.a.outputs.traffic }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - id: a
+        run: |
+          python3 tools/ci/affected_stacks.py --base HEAD~1 > affected.json
+          echo "foundation=$(jq -c '.layers.foundation' affected.json)" >> "$GITHUB_OUTPUT"
+          echo "traffic=$(jq -c '.layers.traffic' affected.json)" >> "$GITHUB_OUTPUT"
+
+  foundation:
+    needs: detect
+    if: needs.detect.outputs.foundation != '[]'
+    strategy:
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJson(needs.detect.outputs.foundation) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_terraform-stack.yml
+    with:
+      stack: ${{ matrix.path }}
+      cloud: ${{ matrix.cloud }}
+      mode: apply
+      env: ${{ matrix.env }}
+    secrets: inherit
+
+  traffic:
+    needs: [detect, foundation]
+    # Runs when foundation succeeded or had nothing to do, never after a failed foundation apply.
+    if: >-
+      always() && needs.detect.result == 'success' && needs.detect.outputs.traffic != '[]'
+      && (needs.foundation.result == 'success' || needs.foundation.result == 'skipped')
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_terraform-stack.yml
+    with:
+      stack: infra/live/global/30-traffic
+      cloud: global
+      mode: apply
+      env: traffic-prod
+    secrets: inherit

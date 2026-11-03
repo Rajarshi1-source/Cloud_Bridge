@@ -435,13 +435,22 @@ The order follows Rev 2 §4.3 and ships first: **a public multi-cloud link by th
 ### Week 5: CI/CD hardening and observability (iac-pipeline, observability-dashboard)
 
 - `global/00-ci-identity` (OIDC roles: plan read-only, apply per environment; WIF with attribute conditions).
-- `_terraform-stack.yml` (saved-plan apply, `concurrency`, `-lockfile=readonly`), `iac-pr.yml` (one sticky comment), `iac-apply.yml`, `iac-engines.yml`, `drift.yml`.
+- `_terraform-stack.yml` (saved-plan apply, `concurrency`, `-lockfile=readonly`), `iac-pr.yml` (one sticky comment), `iac-apply.yml`, `drift.yml`. (`iac-engines.yml` was dropped: `iac-checks.yml` already runs every stack on both engines.)
 - tflint, Trivy config and Conftest (`infra/policy/*.rego`); Infracost diff.
 - Prometheus agent in cells → `remote_write` through Access → central receiver.
 - Recording and alert rules (`cb:*`, `CellSLOBurnFast/Slow`, `ExitPlanEvidenceStale`, `CostDataStale`), Alertmanager, blackbox.
 - Grafana with five provisioned dashboards.
 - k6 load test that writes the measured per-pod RPS into `gitops/cells/<cell>/capacity.yaml`.
 - **Done when:** a PR shows both plans, the cost delta and the policy result in one comment.
+- **Status (3 Nov 2026):** observability verified on the local twin (results in `docs/runbooks/local-twin.md`). The pipeline is built and checked offline. **"Done when" is not yet met on a real PR:** the comment is proven by unit tests on fixtures, and until the identities exist a real PR shows "not planned" and "not measured". Switch-on list: [iac-pipeline.md](runbooks/iac-pipeline.md). What changed from the plan above:
+  - **No `iac-engines.yml`.** `iac-checks.yml` already runs every stack on both engines.
+  - **Pipeline stacks.** `aws-budget/10-foundation`, `gcp-budget/10-foundation` and `global/30-traffic`. `*-dev`, `00-ci-identity` and `20-origin-tls` stay out, for the reasons in the runbook.
+  - **Pulled forward from Week 6.** `control-plane/migrations/` (V1 to V6 from the finops skill, plus `V7__roles.sql`), so dashboards read real, empty tables.
+  - **Deferred.** The central stack's real deployment, the `metrics.<domain>` Access application, DNS and service token (with the control-plane VM, Week 6). The Cloudflare analytics exporter is not built: the observed split is what the origins saw. Real cells keep `observability.enabled: false` until then.
+  - **Canary analysis.** Week 7 will query the central Prometheus with a `cb_cell` filter, since a query-capable Prometheus doesn't fit a 2 GiB cell.
+  - **Traefik limit raised from 128 to 256 MiB, on budget cells too.** k6 found that the old limit takes the whole ingress down at 40 RPS. With the agent's 128 MiB, a 2 GiB VM gets tighter, and that is still unmeasured on a real VM.
+  - **Capacity.** `gitops/cells/cb-*-local/capacity.yaml` hold twin numbers. `cb-*-budget` stay at 0, so the capacity check keeps refusing to evacuate there until k6 runs against a real VM.
+  - **Never run on a cloud.** OIDC and Workload Identity trust, the apply identities' permissions, saved-plan applies, Infracost (needs a key) and Conftest on a real `plan.json`.
 
 ### Week 6: D1 parity and D4 cost ledger (parity-contract, finops-steering, observability-dashboard)
 

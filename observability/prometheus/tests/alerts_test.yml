@@ -1,0 +1,170 @@
+# promtool test rules tests/alerts_test.yml
+rule_files:
+  - ../rules/sli.yml
+  - ../rules/alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 10% errors for 70 minutes in one cell: fast burn fires there, and the healthy cell stays quiet.
+  - interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{service="api-gateway",cb_cell="cb-aws-x",cb_cloud="aws",cb_env="x",uri="/orders",status="201"}'
+        values: '0+540x70'
+      - series: 'http_server_requests_seconds_count{service="api-gateway",cb_cell="cb-aws-x",cb_cloud="aws",cb_env="x",uri="/orders",status="503"}'
+        values: '0+60x70'
+      - series: 'http_server_requests_seconds_count{service="api-gateway",cb_cell="cb-gcp-x",cb_cloud="gcp",cb_env="x",uri="/orders",status="201"}'
+        values: '0+200x70'
+      # The allocator calls each cell whatever the weights say: this must not move the split.
+      - series: 'http_server_requests_seconds_count{service="api-gateway",cb_cell="cb-gcp-x",cb_cloud="gcp",cb_env="x",uri="/admin/leases/grant",status="200"}'
+        values: '0+1000x70'
+      - series: 'up{job="apps",cb_cell="cb-aws-x",cb_cloud="aws",cb_env="x"}'
+        values: '1x70'
+      - series: 'up{job="apps",cb_cell="cb-gcp-x",cb_cloud="gcp",cb_env="x"}'
+        values: '1x70'
+      - series: 'probe_success{job="blackbox-edge"}'
+        values: '1x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: CellSLOBurnFast
+        exp_alerts:
+          - exp_labels: { severity: page, cb_cell: cb-aws-x, cb_cloud: aws, cb_env: x }
+            exp_annotations:
+              summary: "cb-aws-x is burning its error budget more than 14.4 times too fast"
+      - eval_time: 65m
+        alertname: GlobalSLOBurnFast
+        exp_alerts: []
+    promql_expr_test:
+      - expr: cb:error_ratio:rate5m{cb_cell="cb-aws-x"}
+        eval_time: 65m
+        exp_samples:
+          - labels: 'cb:error_ratio:rate5m{cb_cell="cb-aws-x",cb_cloud="aws",cb_env="x"}'
+            value: 0.1
+      # A cell that never had a 5xx reads as 0 errors, not as no data.
+      - expr: cb:error_ratio:rate1h{cb_cell="cb-gcp-x"}
+        eval_time: 65m
+        exp_samples:
+          - labels: 'cb:error_ratio:rate1h{cb_cell="cb-gcp-x",cb_cloud="gcp",cb_env="x"}'
+            value: 0
+      - expr: cb:availability:ratio_rate1h{cb_cell="cb-gcp-x"}
+        eval_time: 65m
+        exp_samples:
+          - labels: 'cb:availability:ratio_rate1h{cb_cell="cb-gcp-x",cb_cloud="gcp",cb_env="x"}'
+            value: 1
+      # 600 of 800 requests a minute went to AWS.
+      - expr: cb:split:observed
+        eval_time: 65m
+        exp_samples:
+          - labels: 'cb:split:observed{cb_cell="cb-aws-x"}'
+            value: 0.75
+          - labels: 'cb:split:observed{cb_cell="cb-gcp-x"}'
+            value: 0.25
+
+  # A short blip does not page: the long window hasn't burned yet.
+  - interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{service="api-gateway",cb_cell="cb-aws-x",cb_cloud="aws",cb_env="x",uri="/orders",status="201"}'
+        values: '0+600x60 36000+0x5'
+      - series: 'http_server_requests_seconds_count{service="api-gateway",cb_cell="cb-aws-x",cb_cloud="aws",cb_env="x",uri="/orders",status="503"}'
+        values: '0x60 0+100x5'
+    alert_rule_test:
+      - eval_time: 64m
+        alertname: CellSLOBurnFast
+        exp_alerts: []
+
+  # 4% errors for hours: slow burn tickets, fast burn stays quiet.
+  - interval: 5m
+    input_series:
+      - series: 'http_server_requests_seconds_count{service="api-gateway",cb_cell="cb-aws-x",cb_cloud="aws",cb_env="x",uri="/orders",status="201"}'
+        values: '0+4800x90'
+      - series: 'http_server_requests_seconds_count{service="api-gateway",cb_cell="cb-aws-x",cb_cloud="aws",cb_env="x",uri="/orders",status="500"}'
+        values: '0+200x90'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: CellSLOBurnSlow
+        exp_alerts:
+          - exp_labels: { severity: ticket, cb_cell: cb-aws-x, cb_cloud: aws, cb_env: x }
+            exp_annotations:
+              summary: "cb-aws-x is burning its error budget more than 6 times too fast"
+      - eval_time: 7h
+        alertname: CellSLOBurnFast
+        exp_alerts: []
+
+  # The edge probe fails for 70 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox-edge"}'
+        values: '0x70'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: GlobalSLOBurnFast
+        exp_alerts:
+          - exp_labels: { severity: page, job: blackbox-edge }
+            exp_annotations:
+              summary: "The probe through the edge is failing"
+
+  # One cell goes quiet: the alert names it, and the other cell is fine.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="apps",cb_cell="cb-aws-x",cb_cloud="aws",cb_env="x"}'
+        values: '1x60 _x30'
+      - series: 'up{job="apps",cb_cell="cb-gcp-x",cb_cloud="gcp",cb_env="x"}'
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: CellMetricsSilent
+        exp_alerts:
+          - exp_labels: { severity: ticket, cb_cell: cb-aws-x, cb_cloud: aws, cb_env: x }
+            exp_annotations:
+              summary: "cb-aws-x stopped sending metrics (agent down, cell down, or the Access token expired)"
+
+  # Evidence: fresh is quiet, old fires, never recorded fires.
+  - interval: 1h
+    input_series:
+      - series: 'cb_last_drill_success_timestamp'
+        values: '0x48'
+      - series: 'cb_billing_latest_timestamp'
+        values: '0+3600x48'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: ExitPlanEvidenceStale
+        exp_alerts: []
+      - eval_time: 2h
+        alertname: CostDataStale
+        exp_alerts: []
+  - interval: 1h
+    input_series:
+      - series: 'cb_last_drill_success_timestamp'
+        values: '0x384'
+      - series: 'cb_billing_latest_timestamp'
+        values: '0x384'
+    alert_rule_test:
+      - eval_time: 15d
+        alertname: ExitPlanEvidenceStale
+        exp_alerts:
+          - exp_labels: { severity: ticket }
+            exp_annotations:
+              summary: "No successful evacuation drill in the last 14 days"
+      - eval_time: 4d
+        alertname: CostDataStale
+        exp_alerts:
+          - exp_labels: { severity: ticket }
+            exp_annotations:
+              summary: "Billing data is more than 72 hours old, or was never ingested"
+  - interval: 1h
+    input_series:
+      - series: 'unrelated'
+        values: '1x4'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: ExitPlanEvidenceStale
+        exp_alerts:
+          - exp_labels: { severity: ticket }
+            exp_annotations:
+              summary: "No successful evacuation drill in the last 14 days"
+      - eval_time: 2h
+        alertname: CostDataStale
+        exp_alerts:
+          - exp_labels: { severity: ticket }
+            exp_annotations:
+              summary: "Billing data is more than 72 hours old, or was never ingested"

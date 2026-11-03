@@ -52,9 +52,11 @@ services:
     restart: unless-stopped
     networks:
       twin:
+        ipv4_address: ${CB_TWIN_NET:-172.29.80}.8   # the cells' Prometheus agents reach it by IP
         aliases:                    # the allocator calls each cell's admin host, as it would in production
           - admin-aws.${CB_TWIN_DOMAIN:-cloudbridge.example}
           - admin-gcp.${CB_TWIN_DOMAIN:-cloudbridge.example}
+          - app.${CB_TWIN_DOMAIN:-cloudbridge.example}   # the blackbox probe goes through the edge
 
   # Stands in for Cloudflare Access: turns a service token into the signed JWT the cells validate, and
   # serves the signing keys. Reuses the toolbox image for its Python and cryptography. Port 443 (plain
@@ -66,6 +68,8 @@ services:
       ACCESS_ISSUER: http://${CB_TWIN_NET:-172.29.80}.7:443
       ACCESS_AUD: twin-admin
       ACCESS_ADMIN_HOSTS: admin-aws.${CB_TWIN_DOMAIN:-cloudbridge.example},admin-gcp.${CB_TWIN_DOMAIN:-cloudbridge.example}
+      ACCESS_METRICS_HOST: metrics.${CB_TWIN_DOMAIN:-cloudbridge.example}
+      ACCESS_METRICS_CLIENT_ID: twin-metrics.access
     volumes:
       - ./access_standin.py:/app/access_standin.py:ro
       - ${TWIN_DIR}/access:/access
@@ -114,6 +118,86 @@ services:
         condition: service_healthy
     restart: unless-stopped
     networks: [twin]
+
+  # The central observability stack: the configuration in observability/, unchanged. Only its secrets
+  # and the address it probes are the twin's own (twin.sh writes them under TWIN_DIR/observability).
+  twin-prometheus:
+    image: prom/prometheus:v3.14.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-remote-write-receiver
+    ports: ["127.0.0.1:${CB_TWIN_PROM_PORT:-9090}:9090"]
+    volumes:
+      - ../../../observability/prometheus:/etc/prometheus:ro
+      - ${TWIN_DIR}/observability/targets:/etc/prometheus/targets:ro
+      - prometheus:/prometheus
+    mem_limit: 512m
+    restart: unless-stopped
+    networks:
+      twin:
+        aliases: [prometheus]
+
+  twin-alertmanager:
+    image: prom/alertmanager:v0.33.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/tmp/alertmanager
+    volumes:
+      - ../../../observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ${TWIN_DIR}/observability/slack_url:/etc/alertmanager/slack_url:ro
+    mem_limit: 64m
+    restart: unless-stopped
+    networks:
+      twin:
+        aliases: [alertmanager]
+
+  twin-blackbox:
+    image: prom/blackbox-exporter:v0.29.1
+    command: [--config.file=/etc/blackbox/blackbox.yml]
+    environment:
+      SSL_CERT_FILE: /pki/ca.crt      # trusts the twin's edge the way a real probe trusts Cloudflare's
+    volumes:
+      - ../../../observability/blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+      - ${TWIN_DIR}/pki:/pki:ro
+    mem_limit: 48m
+    restart: unless-stopped
+    networks:
+      twin:
+        aliases: [blackbox]
+
+  twin-grafana:
+    image: grafana/grafana:13.2.5
+    environment:
+      CP_DB_HOST: twin-cp-db:5432
+      CP_DB_SSLMODE: disable
+      GF_AUTH_ANONYMOUS_ENABLED: "true"   # published on 127.0.0.1 only
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/overview.json
+    ports: ["127.0.0.1:${CB_TWIN_GRAFANA_PORT:-3000}:3000"]
+    volumes:
+      - ../../../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ${TWIN_DIR}/observability/grafana-secrets:/etc/grafana/secrets:ro
+    mem_limit: 384m
+    restart: unless-stopped
+    networks: [twin]
+
+  # Stands in for Slack and the Event-Driven Ansible webhook: records what Alertmanager sends.
+  twin-alert-sink:
+    image: cloudbridge/ansible-toolbox:local
+    command: [python3, -I, /app/alert_sink.py]
+    volumes:
+      - ./alert_sink.py:/app/alert_sink.py:ro
+      - ${TWIN_DIR}/observability/alerts:/alerts
+    restart: unless-stopped
+    networks:
+      twin:
+        aliases: [eda]
 
   # Argo CD in both cells follows a snapshot of this working tree (branch "twin"), so changes are
   # tested before they're pushed, and a private GitHub repo needs no token here. Smart HTTP, because
@@ -176,3 +260,4 @@ volumes:
   mirror:
   registry:
   cp-db:
+  prometheus:

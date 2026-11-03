@@ -1,0 +1,237 @@
+{
+  "description": "Is delivery healthy?",
+  "editable": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Syncs per hour by result, pushed by each cell's agent every 15 s.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "no measurement yet",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (cb_cell, phase) (increase(argocd_app_sync_total[1h]))",
+          "instant": false,
+          "legendFormat": "{{cb_cell}} {{phase}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Argo CD syncs",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Live from each cell's Argo CD.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "no measurement yet",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (cb_cell) (argocd_app_info{sync_status!=\"Synced\"}) or sum by (cb_cell) (argocd_app_info{health_status!=\"Healthy\"})",
+          "instant": false,
+          "legendFormat": "{{cb_cell}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Applications out of sync or unhealthy",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Rollouts that aren't Healthy. Live from each cell's Argo Rollouts.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "no measurement yet",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (cb_cell, phase) (rollout_info{phase!=\"Healthy\"})",
+          "instant": false,
+          "legendFormat": "{{cb_cell}} {{phase}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Rollouts by phase",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "From the deployments table; started_at dates it.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT DISTINCT ON (cell_id) cell_id, commit_sha, status, started_at FROM deployments WHERE kind = 'release' ORDER BY cell_id, started_at DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Latest release per cell",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "Change-failure rate counts failed and rolled-back deployments; latest dates the row.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT cell_id, kind, count(*) AS deployments, count(*) FILTER (WHERE status = 'rolled_back') AS rolled_back, round(100.0 * count(*) FILTER (WHERE status IN ('failed', 'rolled_back')) / count(*), 1) AS change_failure_pct, max(started_at) AS latest FROM deployments WHERE started_at > now() - interval '30 days' GROUP BY 1, 2 ORDER BY 1, 2",
+          "refId": "A"
+        }
+      ],
+      "title": "Deploy frequency, 30 days",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "From first cell (canary ring) to last (main ring).",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT commit_sha, min(started_at) AS first_cell, max(finished_at) AS last_cell, max(finished_at) - min(started_at) AS lead_time FROM deployments WHERE kind = 'release' AND status = 'applied' GROUP BY 1 ORDER BY first_cell DESC LIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Lead time, commit to each cell",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": [
+    "cloudbridge"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Delivery",
+  "uid": "cb-delivery"
+}

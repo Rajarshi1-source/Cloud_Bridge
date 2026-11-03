@@ -1,0 +1,212 @@
+# One stack, one state, one identity. mode=plan stops after the plan; mode=apply then waits in the
+# stack's GitHub environment, where a reviewer approves the plan this run made, and applies exactly
+# that plan. A saved plan refuses to apply if state moved in between, which is the safe failure.
+# Setup: docs/runbooks/iac-pipeline.md. Until the plan identity is configured, every stack reports
+# "not planned" and nothing fails, so this workflow can merge before the clouds exist.
+name: terraform-stack
+
+on:
+  workflow_call:
+    inputs:
+      stack:
+        type: string
+        required: true
+      cloud:
+        type: string
+        required: true
+      mode:
+        type: string
+        required: true
+      env:
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "1"
+  TF_VAR_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
+  TF_VAR_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # OIDC to the read-only plan identities; no stored cloud keys
+    concurrency:
+      group: tf-plan-${{ inputs.stack }}-${{ github.ref }}
+      cancel-in-progress: ${{ inputs.mode == 'plan' }}
+    outputs:
+      changes: ${{ steps.report.outputs.changes }}
+      tfplan_sha256: ${{ steps.report.outputs.tfplan_sha256 }}
+      slug: ${{ steps.cfg.outputs.slug }}
+    steps:
+      - name: Skip a stack whose CI identity isn't configured yet
+        id: cfg
+        env:
+          STACK: ${{ inputs.stack }}
+          CLOUD: ${{ inputs.cloud }}
+          AWS_ROLE: ${{ vars.AWS_PLAN_ROLE }}
+          GCP_SA: ${{ vars.GCP_PLAN_SA }}
+        run: |
+          slug=${STACK//\//-}
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+          ready=true
+          if [ "$CLOUD" != gcp ] && [ -z "$AWS_ROLE" ]; then ready=false; fi
+          if [ "$CLOUD" != aws ] && [ -z "$GCP_SA" ]; then ready=false; fi
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+          if [ "$ready" = false ]; then
+            echo "::notice::No plan identity for $STACK yet (docs/runbooks/iac-pipeline.md)."
+            mkdir -p "$RUNNER_TEMP/report"
+            jq -n --arg stack "$STACK" --arg cloud "$CLOUD" \
+              '{stack: $stack, cloud: $cloud, status: "skipped", reason: "CI identity not configured"}' \
+              > "$RUNNER_TEMP/report/report.json"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: steps.cfg.outputs.ready == 'true' && inputs.cloud != 'gcp'
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE }}
+          aws-region: ap-south-1
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: steps.cfg.outputs.ready == 'true' && inputs.cloud != 'aws'
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PLAN_SA }}
+
+      - name: Plan
+        if: steps.cfg.outputs.ready == 'true'
+        working-directory: ${{ inputs.stack }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_READ_TOKEN }}
+        run: |
+          terraform init -input=false -lockfile=readonly
+          terraform plan -input=false -lock-timeout=5m -out=tfplan
+          terraform show -json tfplan > plan.json
+
+      - name: Policy, cost and the report
+        id: report
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          STACK: ${{ inputs.stack }}
+          CLOUD: ${{ inputs.cloud }}
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+        run: |
+          out="$RUNNER_TEMP/report"; mkdir -p "$out"
+          python3 tools/ci/plan_report.py "$STACK/plan.json" --stack "$STACK" --cloud "$CLOUD" > "$out/report.json"
+          docker run --rm -v "$PWD":/w:ro -w /w openpolicyagent/conftest:v0.71.1 \
+            test "$STACK/plan.json" -p infra/policy --output json > "$out/conftest.json" || true
+          if [ -n "$INFRACOST_API_KEY" ]; then
+            docker run --rm -v "$PWD":/w:ro -w /w -e INFRACOST_API_KEY infracost/infracost:ci-0.10.47 \
+              diff --path "$STACK/plan.json" --format json > "$out/infracost.json" \
+              || { echo "::warning::Infracost failed: the cost delta shows as not measured"; rm -f "$out/infracost.json"; }
+          else
+            echo "::notice::INFRACOST_API_KEY is not set: the cost delta shows as not measured"
+          fi
+          {
+            echo "### Plan for \`$STACK\`"
+            jq -r '"\(.counts.add) to add, \(.counts.change) to change, \(.counts.destroy) to destroy. plan sha256: `\(.plan_sha256)`"' "$out/report.json"
+            echo '```'
+            terraform -chdir="$STACK" show -no-color tfplan | grep -E '^\s*# |^Plan:|^No changes' | head -n 200
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "changes=$(jq '.counts.add + .counts.change + .counts.destroy' "$out/report.json")" >> "$GITHUB_OUTPUT"
+          echo "tfplan_sha256=$(sha256sum "$STACK/tfplan" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: report-${{ steps.cfg.outputs.slug }}
+          path: ${{ runner.temp }}/report
+          retention-days: 7
+
+      - name: Refuse to carry a plan that fails policy to apply
+        if: steps.cfg.outputs.ready == 'true' && inputs.mode == 'apply'
+        run: |
+          if [ "$(jq '[.[].failures // [] | length] | add // 0' "$RUNNER_TEMP/report/conftest.json")" != 0 ]; then
+            jq -r '.[].failures // [] | .[].msg' "$RUNNER_TEMP/report/conftest.json"
+            echo "::error::Policy failed: this plan will not be offered for apply"; exit 1
+          fi
+
+      # A plan file can hold sensitive values, so it leaves this job encrypted and is kept for a day.
+      - name: Encrypt the saved plan for the apply job
+        if: steps.cfg.outputs.ready == 'true' && inputs.mode == 'apply' && steps.report.outputs.changes != '0'
+        env:
+          STACK: ${{ inputs.stack }}
+          PLAN_KEY: ${{ secrets.CB_PLAN_KEY }}
+        run: |
+          [ -n "$PLAN_KEY" ] || { echo "::error::Secret CB_PLAN_KEY is not set"; exit 1; }
+          openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:PLAN_KEY -in "$STACK/tfplan" -out "$RUNNER_TEMP/tfplan.enc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.cfg.outputs.ready == 'true' && inputs.mode == 'apply' && steps.report.outputs.changes != '0'
+        with:
+          name: tfplan-${{ steps.cfg.outputs.slug }}
+          path: ${{ runner.temp }}/tfplan.enc
+          retention-days: 1
+
+  apply:
+    needs: plan
+    if: inputs.mode == 'apply' && needs.plan.outputs.changes != '' && needs.plan.outputs.changes != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ${{ inputs.env }} # GitHub pauses here for the required reviewers
+    permissions:
+      contents: read
+      id-token: write # an apply identity only trusts a job running inside this environment
+    concurrency:
+      group: tf-${{ inputs.stack }} # never two applies on one stack, and never cancel a running one
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: inputs.cloud != 'gcp'
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE }} # environment variable
+          aws-region: ap-south-1
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: inputs.cloud != 'aws'
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_APPLY_SA }} # environment variable
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tfplan-${{ needs.plan.outputs.slug }}
+          path: ${{ runner.temp }}
+
+      - name: Apply exactly the reviewed plan
+        working-directory: ${{ inputs.stack }}
+        env:
+          PLAN_KEY: ${{ secrets.CB_PLAN_KEY }}
+          WANT_SHA256: ${{ needs.plan.outputs.tfplan_sha256 }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }} # environment secret (traffic-prod)
+        run: |
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:PLAN_KEY -in "$RUNNER_TEMP/tfplan.enc" -out tfplan
+          echo "$WANT_SHA256  tfplan" | sha256sum --check --strict
+          terraform init -input=false -lockfile=readonly
+          terraform apply -input=false tfplan

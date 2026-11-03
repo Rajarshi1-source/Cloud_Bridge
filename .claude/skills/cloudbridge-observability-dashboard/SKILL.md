@@ -29,6 +29,15 @@ Rev 1 federated each cell's Prometheus across the internet, which requires inbou
 
 Scale-out path when one receiver isn't enough (≈1M active series or > 30 days retention): Grafana Mimir or Thanos Receive — same `remote_write` protocol, no cell changes.
 
+### As built (Week 5)
+
+- **Agent:** `gitops/charts/platform-addons/templates/prometheus-agent.yaml`, off until `observability.enabled` (a real cell needs its `metrics-writer` Secret and the central receiver first). 128 MiB limit, `GOMEMLIMIT` 110 MiB, WAL in a 256 MiB emptyDir, Access token headers read from files. It scrapes the apps (`honor_labels`, since they tag `cb_cell` and `service` themselves), Argo CD and Rollouts. No kube-state-metrics: the capacity API brings live HPA data in Week 6.
+- **Canary analysis:** points at the central receiver with a `cb_cell` filter. A query-capable Prometheus doesn't fit a 2 GiB cell, and an unreachable receiver fails the analysis, which is the safe way round.
+- **Split:** `cb:split:observed` is each cell's share of user requests at the gateway, leaving out health probes and the allocator's admin calls, which reach each cell whatever the weights say (idle, they read as a false 50/50). No user traffic means no data. The Cloudflare analytics exporter is not built, so this says what origins saw, not what Cloudflare counted.
+- **Rules:** error ratios use `or 0 *` so a cell with no 5xx reads 0, not no data. `CellMetricsSilent` catches a cell that stops reporting, which a burn-rate rule can't see.
+- **Stat panels show numbers only:** a timestamp must go out as epoch milliseconds (`as_of()` in `build_dashboards.py`), or the panel claims "no measurement yet" with data in hand. `twin.sh observe` fails on this.
+- **Capacity:** `tools/load/measure_capacity.py` writes a cell's own `capacity.yaml`. Fan-out in that file is what the load mix produced, and a number from the twin says nothing about a budget VM, whose file stays at 0.
+
 ## SLIs and SLOs
 
 Recording rules (names used everywhere — evacuation playbook, ring promotion, recommender):
