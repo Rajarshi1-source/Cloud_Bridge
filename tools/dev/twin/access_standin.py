@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Stands in for Cloudflare Access on the twin, so the services' real JWT validation runs.
 
-The edge asks /auth about every admin-host request (Traefik forwardAuth). A known service token gets
+The edge asks /auth about every protected request (Traefik forwardAuth). A known service token gets
 the same answer Access gives: a signed RS256 JWT in Cf-Access-Jwt-Assertion, with iss, aud and
 common_name set the way the origin expects. Anything else gets 403 and never reaches the cell. Cells
-fetch the public key from /cdn-cgi/access/certs, the path Access uses.
+fetch the public key from /cdn-cgi/access/certs, the path Access uses. As with real Access policies,
+the metrics host admits only the metrics token, and the metrics token opens nothing else.
 
 It proves the origin's checks, not Cloudflare's: real Access claim names must still be confirmed on a
 real team domain (docs/runbooks/local-twin.md).
@@ -26,6 +27,8 @@ STATE = Path(os.environ.get("ACCESS_STATE_DIR", "/access"))
 ISSUER = os.environ["ACCESS_ISSUER"]
 AUDIENCE = os.environ["ACCESS_AUD"]
 ADMIN_HOSTS = set(os.environ["ACCESS_ADMIN_HOSTS"].split(","))
+METRICS_HOST = os.environ["ACCESS_METRICS_HOST"]
+METRICS_CLIENT_ID = os.environ["ACCESS_METRICS_CLIENT_ID"]
 TOKEN_LIFETIME_SECONDS = 300
 
 
@@ -117,7 +120,8 @@ class Handler(BaseHTTPRequestHandler):
         # The JWT names the id from the token file, so nothing from the request reaches a response header.
         known = next((k for k, expected in service_tokens().items()
                       if k == client_id and hmac.compare_digest(expected, secret)), None)
-        if host in ADMIN_HOSTS and known:
+        allowed = known == METRICS_CLIENT_ID if host == METRICS_HOST else host in ADMIN_HOSTS and known != METRICS_CLIENT_ID
+        if known and allowed:
             self.answer(200, headers={"Cf-Access-Jwt-Assertion": sign(known)})
         else:
             self.answer(403, b"Forbidden by Access\n", {"Content-Type": "text/plain"})

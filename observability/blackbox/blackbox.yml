@@ -1,0 +1,11 @@
+# A 200 alone could come from anything in front of the cells; X-CB-Cell proves a cell answered.
+modules:
+  http_2xx_cell:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      valid_status_codes: [200]
+      fail_if_header_not_matches:
+        - header: X-CB-Cell
+          regexp: "^cb-(aws|gcp)-"

@@ -19,12 +19,29 @@ addons:
 ingress:
   className: ""
 
-# Canary analysis queries an in-cell Prometheus, which arrives with observability in Week 5.
+# Canary analysis (Week 7) queries the central Prometheus with a cb_cell filter: an agent can't answer
+# queries, and a second, query-capable Prometheus doesn't fit a 2 GiB cell. If the central Prometheus
+# is unreachable, the analysis fails and the canary stops, which is the safe way round.
 analysis:
   enabled: false
-  prometheusAddress: http://prometheus-query.monitoring:9090
+  prometheusAddress: ""
   maxErrorRate: "0.01"
   maxP95Seconds: "0.3"
+
+# Prometheus agent: pushes to https://metrics.<domain> through Cloudflare Access. Off until the cell has
+# a metrics-writer Secret and the central receiver exists: without them it would only fill its WAL.
+observability:
+  enabled: false
+  image: prom/prometheus:v3.14.0
+  goMemLimit: 110MiB
+  walSizeLimit: 256Mi
+  resources:
+    requests: { cpu: 25m, memory: 96Mi }
+    limits: { memory: 128Mi }
+  remoteWrite:
+    edgePort: ""              # the twin's edge listens on 8443
+    edgeIp: ""                # the twin only: no public DNS for its edge
+    caFile: ""                # the twin only: its edge has a private CA
 
 network:
   # Where ingress traffic to the gateway comes from: the controller's namespace (k3s Traefik) or

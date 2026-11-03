@@ -7,3 +7,7 @@ cell_secrets_db_name: cell
 cell_secrets_access_team_domain: "{{ lookup('ansible.builtin.env', 'CF_ACCESS_TEAM_DOMAIN') }}"
 cell_secrets_access_aud: "{{ lookup('ansible.builtin.env', 'CF_ACCESS_AUD') }}"
 cell_secrets_access_allowed_client_ids: "{{ lookup('ansible.builtin.env', 'CF_ACCESS_ALLOWED_CLIENT_IDS') }}"
+# The Prometheus agent's Access service token. Empty: no metrics-writer Secret, and the agent stays off.
+cell_secrets_metrics_client_id: "{{ lookup('ansible.builtin.env', 'CF_METRICS_CLIENT_ID') }}"
+cell_secrets_metrics_client_secret: "{{ lookup('ansible.builtin.env', 'CF_METRICS_CLIENT_SECRET') }}"
+cell_secrets_metrics_ca: ""

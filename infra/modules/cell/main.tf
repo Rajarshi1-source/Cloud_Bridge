@@ -65,7 +65,6 @@ module "eks" {
   count         = var.cloud == "aws" && local.managed ? 1 : 0
   name          = local.name
   k8s_version   = var.kubernetes_minor
-  vpc_id        = local.net.network_id
   subnet_ids    = local.net.private_subnet_ids
   instance_type = local.instance_type
   desired       = var.node_count

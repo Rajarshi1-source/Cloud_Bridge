@@ -1,0 +1,475 @@
+{
+  "description": "Are both cells healthy, and is the split what I configured?",
+  "editable": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "The latest row of traffic_changes: what Terraform was told, updated when a weight changes.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "SELECT applied_at AS \"time\", (weights->>'aws')::float / 100 AS aws FROM traffic_changes ORDER BY applied_at DESC LIMIT 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Configured AWS share",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "The AWS cell's share of gateway requests as the origins saw them. Live: scraped every 15 s, then a 5 minute rate window.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cb:split:observed{cb_cell=~\"cb-aws-.*\"}",
+          "instant": true,
+          "legendFormat": "observed",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Observed AWS share",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "When the configured weights last changed.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "dateTimeAsIso"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT extract(epoch FROM max(applied_at)) * 1000 AS at FROM traffic_changes",
+          "refId": "A"
+        }
+      ],
+      "title": "Configured as of",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "1 when the last probe through the edge got a 200 with X-CB-Cell. Scraped every 30 s.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "min(probe_success{job=\"blackbox-edge\"})",
+          "instant": true,
+          "legendFormat": "edge",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Probe through the edge",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Each cell's share of gateway requests. Live: scraped every 15 s, then a 5 minute rate window.",
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "noValue": "no measurement yet",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 5,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cb:split:observed",
+          "instant": false,
+          "legendFormat": "{{cb_cell}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Observed split",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Gateway requests per cell, health checks excluded. Live: scraped every 15 s, then a 5 minute rate window.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet",
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 6,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cb:requests:rate5m{service=\"api-gateway\"}",
+          "instant": false,
+          "legendFormat": "{{cb_cell}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Requests per second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "1 minus the share of gateway 5xx over the last hour. SLO: 99.5%.",
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "noValue": "no measurement yet",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 12
+      },
+      "id": 7,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cb:availability:ratio_rate1h",
+          "instant": false,
+          "legendFormat": "{{cb_cell}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Availability, 1 hour",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "The share of gateway 5xx. Live: scraped every 15 s, then a 5 minute rate window.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "no measurement yet",
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 12
+      },
+      "id": 8,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cb:error_ratio:rate5m",
+          "instant": false,
+          "legendFormat": "{{cb_cell}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Error ratio, 5 minutes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Live: scraped every 15 s, then a 5 minute rate window.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "no measurement yet",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 12
+      },
+      "id": 9,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cb:latency_p95:5m{service=\"api-gateway\"}",
+          "instant": false,
+          "legendFormat": "{{cb_cell}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Gateway p95 latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "p95 of each service. Live: scraped every 15 s, then a 5 minute rate window.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "no measurement yet",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "id": 10,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cb:latency_p95:5m",
+          "instant": false,
+          "legendFormat": "{{cb_cell}} {{service}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Latency by service",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "How old each cell's newest pushed sample is. Above a minute, its agent has stopped or can't reach the receiver.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "no measurement yet",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "id": 11,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "time() - max by (cb_cell) (timestamp(up{job=\"apps\"}))",
+          "instant": false,
+          "legendFormat": "{{cb_cell}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Age of the newest sample",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": [
+    "cloudbridge"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Multi-cloud overview",
+  "uid": "cb-overview"
+}

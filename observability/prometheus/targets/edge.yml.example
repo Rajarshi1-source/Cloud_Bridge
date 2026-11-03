@@ -1,0 +1,2 @@
+# Copy to edge.yml in the environment that runs the central stack: the address its probe goes through.
+- targets: ["https://app.example.com/healthz/cell"]

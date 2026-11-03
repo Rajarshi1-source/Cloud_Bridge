@@ -11,10 +11,14 @@
 #   bash tools/dev/twin.sh promote         # skip the canaries: only the new images, and wait for them
 #   bash tools/dev/twin.sh check           # split, affinity, API smoke through the edge
 #   bash tools/dev/twin.sh leases          # allocator, forged grants, restarts, no overselling
+#   bash tools/dev/twin.sh observe         # metrics through Access, rules, split, Grafana
+#   bash tools/dev/twin.sh burn aws|gcp    # stop order-service for real: CellSLOBurnFast must page
+#   bash tools/dev/twin.sh capacity aws|gcp  # k6: per-pod RPS into gitops/cells/<cell>/capacity.yaml
 #   bash tools/dev/twin.sh outage aws|gcp  # pause a whole cell; traffic must move; then restore it
 #   bash tools/dev/twin.sh kubectl aws|gcp ARGS...  # the cell's bundled kubectl
 #   bash tools/dev/twin.sh status | down | purge
 # Edge: https://app.<domain>:8443 (curl --cacert ~/.cache/cloudbridge-twin/pki/ca.crt --resolve ...)
+# Grafana: http://127.0.0.1:3000  Prometheus: http://127.0.0.1:9090
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TWIN_DIR="${CB_TWIN_DIR:-$HOME/.cache/cloudbridge-twin}"
@@ -26,6 +30,7 @@ DOMAIN=$(sed -n 's/^domain:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$REPO/gitops/g
 export TWIN_DIR CB_TWIN_NET="$NET" CB_TWIN_EDGE_PORT="$EDGE_PORT" CB_TWIN_REGISTRY_PORT="$REGISTRY_PORT" CB_TWIN_DOMAIN="$DOMAIN"
 TWIN_ACCESS_AUD=twin-admin
 TWIN_ALLOCATOR_ID=twin-allocator.access
+TWIN_METRICS_ID=twin-metrics.access
 access_issuer() { echo "http://$NET.7:443"; }
 HOST="app.$DOMAIN"
 CELLS="aws gcp"
@@ -50,7 +55,8 @@ pki() { # local stand-ins for the Cloudflare Origin CA certificate and the edge 
     -keyout "$d/ca.key" -out "$d/ca.crt" 2>/dev/null
   issue() { # name, SANs
     [ -f "$d/$1.crt" ] && return
-    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$HOST" \
+    local cn=${2%%,*}   # its first name: Traefik matches a certificate on the CN as well as the SANs
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=${cn#DNS:}" \
       -keyout "$d/$1.key" -out "$d/$1.csr" 2>/dev/null
     openssl x509 -req -in "$d/$1.csr" -CA "$d/ca.crt" -CAkey "$d/ca.key" -CAcreateserial -days 825 \
       -extfile <(printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature\nauthorityKeyIdentifier=keyid\nsubjectKeyIdentifier=hash\n' "$2") \
@@ -61,18 +67,58 @@ pki() { # local stand-ins for the Cloudflare Origin CA certificate and the edge 
   issue origin "DNS:$HOST,DNS:admin-aws.$DOMAIN,DNS:admin-gcp.$DOMAIN"
   issue edge "DNS:$HOST"
   issue edge-admin "DNS:admin-aws.$DOMAIN,DNS:admin-gcp.$DOMAIN"
+  issue edge-metrics "DNS:metrics.$DOMAIN"
   chmod 0644 "$d"/*.crt "$d"/*.key   # read by the toolbox and Traefik containers; local test keys only
   echo "pki: twin CA, origin and edge certificates in $d"
 }
 
-access() { # the service tokens the Access stand-in knows: the allocator's, and one the cells don't allow
+access() { # the service tokens the Access stand-in knows: the allocator's, the metrics agents', and one the cells don't allow
   local d="$TWIN_DIR/access"; mkdir -p "$d"
-  [ -f "$d/allocator.env" ] && return
-  local secret other; secret=$(openssl rand -hex 32); other=$(openssl rand -hex 32)
+  [ -f "$d/allocator.env" ] && [ -f "$d/metrics.env" ] && return
+  # A twin from before Week 5 keeps its allocator token, so the cells' secrets don't change.
+  local secret other metrics
+  secret=$(sed -n 's/^CF_ACCESS_CLIENT_SECRET=//p' "$d/allocator.env" 2>/dev/null); secret=${secret:-$(openssl rand -hex 32)}
+  other=$(openssl rand -hex 32); metrics=$(openssl rand -hex 32)
   printf 'CF_ACCESS_CLIENT_ID=%s\nCF_ACCESS_CLIENT_SECRET=%s\n' "$TWIN_ALLOCATOR_ID" "$secret" >"$d/allocator.env"
-  printf '{"%s": "%s", "twin-other.access": "%s"}\n' "$TWIN_ALLOCATOR_ID" "$secret" "$other" >"$d/service-tokens.json"
-  chmod 0644 "$d"/*   # local test tokens, read by the containers
+  printf 'CF_ACCESS_CLIENT_ID=%s\nCF_ACCESS_CLIENT_SECRET=%s\n' "$TWIN_METRICS_ID" "$metrics" >"$d/metrics.env"
+  printf '{"%s": "%s", "twin-other.access": "%s", "%s": "%s"}\n' "$TWIN_ALLOCATOR_ID" "$secret" "$other" "$TWIN_METRICS_ID" "$metrics" >"$d/service-tokens.json"
+  chmod 0644 "$d"/allocator.env "$d"/metrics.env "$d"/service-tokens.json   # local test tokens, read by the containers
   echo "access: service tokens in $d"
+}
+
+observability_config() { # what the central stack's configuration leaves to each environment
+  local d="$TWIN_DIR/observability"
+  mkdir -p "$d/targets" "$d/grafana-secrets" "$d/alerts"
+  printf -- '- targets: ["https://%s:%s/healthz/cell"]\n' "$HOST" "$EDGE_PORT" >"$d/targets/edge.yml"
+  printf 'http://twin-alert-sink:5000/slack' >"$d/slack_url"
+  [ -f "$d/grafana-secrets/cp_reader_password" ] || openssl rand -hex 24 >"$d/grafana-secrets/cp_reader_password"
+  touch "$d/alerts/received.jsonl"
+  chmod -R a+rX "$d"; chmod a+rwx "$d/alerts"; chmod a+rw "$d/alerts/received.jsonl"
+}
+
+control_plane_db() { # the control plane's real migrations, and the weights the edge reads as its first traffic change
+  cp_psql() { compose exec -T twin-cp-db psql -v ON_ERROR_STOP=1 -q -U allocator "$@"; }
+  [ "$(compose exec -T twin-cp-db psql -U allocator -d allocator -Atc "SELECT 1 FROM pg_database WHERE datname='controlplane'" | tr -d '\r')" = 1 ] \
+    || cp_psql -d allocator -c "CREATE DATABASE controlplane"
+  cp_psql -d controlplane -c "CREATE TABLE IF NOT EXISTS twin_migrations (name text PRIMARY KEY)"
+  local f name
+  for f in "$REPO"/control-plane/migrations/V*.sql; do
+    name=$(basename "$f")
+    [ -z "$(cp_psql -d controlplane -Atc "SELECT 1 FROM twin_migrations WHERE name='$name'" | tr -d '\r')" ] || continue
+    cp_psql -d controlplane <"$f"
+    cp_psql -d controlplane -c "INSERT INTO twin_migrations VALUES ('$name')"
+    echo "control plane: applied $name"
+  done
+  cp_psql -d controlplane -c "ALTER ROLE cp_reader PASSWORD '$(cat "$TWIN_DIR/observability/grafana-secrets/cp_reader_password")'"
+  record_weights
+}
+
+record_weights() { # traffic_changes follows the tfvars file, as the apply workflow's POST does in production
+  local w
+  w=$(python3 -I -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1]))["weights"],sort_keys=True))' "$REPO/infra/live/global/30-traffic/terraform.tfvars.json")
+  compose exec -T twin-cp-db psql -v ON_ERROR_STOP=1 -q -U allocator -d controlplane -c \
+    "INSERT INTO traffic_changes (weights, source) SELECT '$w'::jsonb, 'manual'
+     WHERE NOT EXISTS (SELECT 1 FROM (SELECT weights FROM traffic_changes ORDER BY applied_at DESC LIMIT 1) l WHERE l.weights = '$w'::jsonb)"
 }
 
 # Cells normally run the ring digests. After `images`, the snapshot's ring files name digests built
@@ -122,7 +168,8 @@ publish() { # snapshot the working tree (tracked + untracked, minus .gitignore) 
 
 render() { # the budget roles, run against directories the cells mount
   docker build -q -t "$TOOLBOX_IMAGE" -f "$REPO/tools/dev/ansible-toolbox.Dockerfile" "$REPO/tools/dev" >/dev/null
-  local cloud out
+  local cloud out metrics_secret
+  metrics_secret=$(sed -n 's/^CF_ACCESS_CLIENT_SECRET=//p' "$TWIN_DIR/access/metrics.env")
   for cloud in $CELLS; do
     if ! out=$(docker run --rm -v "$REPO":/work:ro -v "$TWIN_DIR":/twin -e ANSIBLE_CONFIG=/work/ansible/ansible.cfg \
         -w /work/ansible "$TOOLBOX_IMAGE" \
@@ -131,7 +178,8 @@ render() { # the budget roles, run against directories the cells mount
           -e twin_dir="/twin/cb-$cloud-local" -e twin_pki=/twin/pki \
           -e twin_git_url="http://$NET.6/git/cloud_bridge.git" \
           -e cell_secrets_access_team_domain="$(access_issuer)" -e cell_secrets_access_aud="$TWIN_ACCESS_AUD" \
-          -e cell_secrets_access_allowed_client_ids="$TWIN_ALLOCATOR_ID" 2>&1); then
+          -e cell_secrets_access_allowed_client_ids="$TWIN_ALLOCATOR_ID" \
+          -e cell_secrets_metrics_client_id="$TWIN_METRICS_ID" -e cell_secrets_metrics_client_secret="$metrics_secret" 2>&1); then
       echo "$out"; echo "render failed for cb-$cloud-local"; exit 1
     fi
     echo "ansible: cb-$cloud-local $(grep -oE 'ok=[0-9]+ +changed=[0-9]+' <<<"$out" | tr -s ' ')"
@@ -277,8 +325,10 @@ outage() { # the whole cell disappears, as in a cloud outage; the edge must move
 case "${1:-}" in
   up)
     mkdir -p "$TWIN_DIR"
-    pki; access; publish; render; weights
+    pki; access; observability_config; publish; render; weights
+    compose --progress quiet up -d --build --remove-orphans --quiet-pull --wait twin-cp-db
     compose --progress quiet up -d --build --remove-orphans --quiet-pull
+    control_plane_db
     refresh
     echo "Argo CD is installing and syncing both cells (first start: about 10 minutes)."
     wait_ready
@@ -291,12 +341,15 @@ case "${1:-}" in
       if [ -n "$(compose ps -q cell-aws 2>/dev/null)" ]; then refresh; echo "Argo CD rolls the new images out (watch: bash tools/dev/twin.sh status)"; fi
     fi
     ;;
-  sync) publish; render; refresh; echo "Argo CD re-syncs from the new snapshot (watch: bash tools/dev/twin.sh status)" ;;
-  weights) weights ;;
+  sync) observability_config; publish; render; refresh; control_plane_db; echo "Argo CD re-syncs from the new snapshot (watch: bash tools/dev/twin.sh status)" ;;
+  weights) weights; record_weights ;;
   check) check ;;
   promote) promote ;;
   leases) source "$REPO/tools/dev/twin/leases.sh"; leases ;;
   outage) outage "${2:-}" ;;
+  observe) source "$REPO/tools/dev/twin/observe.sh"; observe ;;
+  burn) source "$REPO/tools/dev/twin/observe.sh"; burn "${2:-}" ;;
+  capacity) source "$REPO/tools/dev/twin/observe.sh"; capacity "${2:-}" ;;
   status) status ;;
   kubectl) case "${2:-}" in aws|gcp) kc "${@:2}" ;; *) echo "kubectl aws|gcp ARGS..."; exit 2 ;; esac ;;
   down) compose down; echo "stopped; cells, data and certificates kept (purge removes them)" ;;

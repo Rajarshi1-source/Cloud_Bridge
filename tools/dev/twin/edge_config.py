@@ -12,6 +12,7 @@ Cloudflare behaviour it reproduces:
     rotation, and when every weighted cell is down the fallback cell takes everything
   - Full (strict) TLS to the origin, verified against the twin's origin CA
   - admin-<cloud> hosts that go straight to one cell, behind Access (access_standin.py)
+  - metrics.<domain>, the central receiver's write path only, behind Access
 Differences, on purpose: the monitor runs every 10 s instead of 60 s and from one place instead of
 two regions, so drills finish in seconds.
 
@@ -99,6 +100,14 @@ def render(domain: str, weights: dict[str, int]) -> dict:
             }
         }
         transports[f"admin-{cloud}"] = {"serverName": admin, "rootCAs": ["/pki/ca.crt"]}
+    routers["metrics"] = {
+        "rule": f"Host(`metrics.{domain}`) && Path(`/api/v1/write`)",
+        "entryPoints": ["websecure"],
+        "middlewares": ["access"],
+        "service": "central-prometheus",
+        "tls": {},
+    }
+    services["central-prometheus"] = {"loadBalancer": {"servers": [{"url": "http://twin-prometheus:9090"}]}}
     return {
         "http": {
             "routers": routers,
@@ -117,6 +126,7 @@ def render(domain: str, weights: dict[str, int]) -> dict:
             "certificates": [
                 {"certFile": "/pki/edge.crt", "keyFile": "/pki/edge.key"},
                 {"certFile": "/pki/edge-admin.crt", "keyFile": "/pki/edge-admin.key"},
+                {"certFile": "/pki/edge-metrics.crt", "keyFile": "/pki/edge-metrics.key"},
             ],
         },
     }

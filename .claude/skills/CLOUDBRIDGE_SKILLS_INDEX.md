@@ -206,3 +206,9 @@ python3 evals/steering/backtest.py
 - terraform-cells: `secret_store` output (five outputs now), `modules/secret-store/{aws,gcp}`, `modules/bootstrap`, `live/<cloud>-dev/20-bootstrap`. RDS moves to `random_password` so both clouds store `{username, password}` under `<cell>-db-admin`.
 - gitops-delivery: `twin.sh images` and `twin.sh leases`; External Secrets and AWS Load Balancer Controller add-ons; `cb-<cloud>-dev` cell values.
 - ansible-ops: `cell_secrets` writes `cell-admin` and fails without the `CF_ACCESS_*` values.
+
+**2026-11-03 — iac-pipeline, observability-dashboard, cell-services, finops-steering (Week 5)**
+- iac-pipeline: "As built" section. No `iac-engines.yml` (`iac-checks.yml` covers both engines), three pipeline stacks, encrypted saved plan checked by hash, one-sided warning from plan counts.
+- observability-dashboard: "As built" section. Agent values, canary analysis against the central receiver, origin-side split, `CellMetricsSilent`, stat panels need numbers, `measure_capacity.py`.
+- cell-services: CSRF stays on with `StatelessCsrfTokenRepository`, because Spring's default opens a session for any anonymous POST to an unlisted route.
+- finops-steering: control-plane migrations extracted, with reader and writer roles.

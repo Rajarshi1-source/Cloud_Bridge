@@ -1,0 +1,48 @@
+# SLIs by name: the evacuation playbook, ring promotion, the recommender and Grafana all use these.
+# Error series exist only after a first 5xx, so each ratio adds "or 0 x total": no errors must read
+# as a ratio of 0, and no traffic must still read as no data.
+groups:
+  - name: cb-sli
+    rules:
+      - record: cb:requests:rate5m
+        expr: sum by (cb_cell, cb_cloud, cb_env, service) (rate(http_server_requests_seconds_count{uri!~"/actuator.*|/healthz.*"}[5m]))
+      - record: cb:errors:rate5m
+        expr: |
+          sum by (cb_cell, cb_cloud, cb_env, service) (rate(http_server_requests_seconds_count{uri!~"/actuator.*|/healthz.*",status=~"5.."}[5m]))
+          or 0 * cb:requests:rate5m
+      - record: cb:latency_p95:5m
+        expr: histogram_quantile(0.95, sum by (cb_cell, cb_cloud, cb_env, service, le) (rate(http_server_requests_seconds_bucket{uri!~"/actuator.*|/healthz.*"}[5m])))
+
+      # Gateway error ratio per cell, one rule per burn-rate window.
+      - record: cb:error_ratio:rate5m
+        expr: |
+          (sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*",status=~"5.."}[5m])) or 0 * sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*"}[5m])))
+          / sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*"}[5m]))
+      - record: cb:error_ratio:rate30m
+        expr: |
+          (sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*",status=~"5.."}[30m])) or 0 * sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*"}[30m])))
+          / sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*"}[30m]))
+      - record: cb:error_ratio:rate1h
+        expr: |
+          (sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*",status=~"5.."}[1h])) or 0 * sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*"}[1h])))
+          / sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*"}[1h]))
+      - record: cb:error_ratio:rate6h
+        expr: |
+          (sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*",status=~"5.."}[6h])) or 0 * sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*"}[6h])))
+          / sum by (cb_cell, cb_cloud, cb_env) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*"}[6h]))
+      - record: cb:availability:ratio_rate1h
+        expr: 1 - cb:error_ratio:rate1h
+
+      # The split as the origins saw it: each cell's share of user requests at the gateway. It needs no
+      # Cloudflare token. The monitor's probes and the allocator's calls go to each cell whatever the
+      # weights say, so they don't count; with no user traffic this is no data, not a made-up 50/50.
+      - record: cb:split:observed
+        expr: |
+          sum by (cb_cell) (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*|/admin.*"}[5m]))
+          / ignoring (cb_cell) group_left () (sum (rate(http_server_requests_seconds_count{service="api-gateway",uri!~"/actuator.*|/healthz.*|/admin.*"}[5m])) > 0)
+
+      # Burn rate of the global 99.9% SLO, from the probe that goes through the edge.
+      - record: cb:edge_error_ratio:rate5m
+        expr: 1 - avg by (job) (avg_over_time(probe_success{job="blackbox-edge"}[5m]))
+      - record: cb:edge_error_ratio:rate1h
+        expr: 1 - avg by (job) (avg_over_time(probe_success{job="blackbox-edge"}[1h]))

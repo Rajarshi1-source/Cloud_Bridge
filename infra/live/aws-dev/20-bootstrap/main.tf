@@ -30,6 +30,10 @@ resource "aws_acm_certificate" "origin" {
   certificate_body = jsondecode(data.aws_secretsmanager_secret_version.origin_tls.secret_string).certificate
   private_key      = jsondecode(data.aws_secretsmanager_secret_version.origin_tls.secret_string).private_key
   tags             = { "cb-cell" = local.cell, "managed-by" = "terraform" }
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 output "argocd_chart_version" {

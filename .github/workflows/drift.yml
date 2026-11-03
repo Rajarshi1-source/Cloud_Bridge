@@ -1,0 +1,99 @@
+# Nightly: did anything change outside Terraform? Read-only plan with the plan identities; exit 2 opens
+# one issue per stack, naming the resources only (never their values). -lock=false, so it never
+# contends with a real apply. A stack whose identity isn't configured is skipped.
+name: drift
+
+on:
+  schedule:
+    - cron: "0 21 * * *" # 02:30 IST
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { path: infra/live/gcp-budget/10-foundation, cloud: gcp }
+          - { path: infra/live/aws-budget/10-foundation, cloud: aws }
+          - { path: infra/live/global/30-traffic, cloud: global }
+    steps:
+      - name: Skip a stack whose CI identity isn't configured yet
+        id: cfg
+        env:
+          CLOUD: ${{ matrix.cloud }}
+          AWS_ROLE: ${{ vars.AWS_PLAN_ROLE }}
+          GCP_SA: ${{ vars.GCP_PLAN_SA }}
+        run: |
+          ready=true
+          if [ "$CLOUD" != gcp ] && [ -z "$AWS_ROLE" ]; then ready=false; fi
+          if [ "$CLOUD" != aws ] && [ -z "$GCP_SA" ]; then ready=false; fi
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          terraform_version: 1.15.9
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: steps.cfg.outputs.ready == 'true' && matrix.cloud != 'gcp'
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE }}
+          aws-region: ap-south-1
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: steps.cfg.outputs.ready == 'true' && matrix.cloud != 'aws'
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PLAN_SA }}
+
+      - id: p
+        if: steps.cfg.outputs.ready == 'true'
+        working-directory: ${{ matrix.path }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_READ_TOKEN }}
+          TF_VAR_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          terraform init -input=false -lockfile=readonly
+          code=0
+          terraform plan -input=false -detailed-exitcode -lock=false -no-color > "$RUNNER_TEMP/plan.txt" || code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" -ne 1 ] || { tail -n 30 "$RUNNER_TEMP/plan.txt"; exit 1; }
+
+      - name: Open or update the drift issue
+        if: steps.p.outputs.code == '2'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          STACK: ${{ matrix.path }}
+        run: |
+          {
+            echo "The nightly plan of \`$STACK\` found changes made outside Terraform on $(date -u +%F):"
+            echo
+            echo '```'
+            grep -E '^\s*# ' "$RUNNER_TEMP/plan.txt" | head -n 80
+            echo '```'
+          } > "$RUNNER_TEMP/body.md"
+          gh label create drift --color B60205 --description "Changed outside Terraform" --force
+          existing=$(gh issue list --label drift --state open --search "in:title \"drift: $STACK\"" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "drift: $STACK" --label drift --body-file "$RUNNER_TEMP/body.md"
+          fi

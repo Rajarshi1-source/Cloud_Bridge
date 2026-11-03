@@ -1,0 +1,138 @@
+# Every infrastructure PR gets one comment: each affected stack's plan, its policy result and its
+# cost delta, AWS and GCP side by side. Offline checks live in iac-checks.yml; this workflow adds
+# what needs the clouds' read-only identities.
+name: iac-pr
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - "gitops/global/values.yaml"
+      - "tools/ci/**"
+      - ".github/workflows/iac-pr.yml"
+      - ".github/workflows/_terraform-stack.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iac-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      stacks: ${{ steps.a.outputs.stacks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: a
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          # A fork's run gets no OIDC token, so a fork's PR is checked offline only.
+          FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/affected"
+          python3 tools/ci/affected_stacks.py --base "origin/$BASE_REF" > "$RUNNER_TEMP/affected/affected.json"
+          if [ "$FORK" = true ]; then
+            echo 'stacks=[]' >> "$GITHUB_OUTPUT"
+          else
+            echo "stacks=$(jq -c '.stacks' "$RUNNER_TEMP/affected/affected.json")" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: affected
+          path: ${{ runner.temp }}/affected/affected.json
+          retention-days: 1
+
+  static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: fmt, tflint, Trivy, Conftest unit tests
+        run: bash tools/dev/iac-check.sh policy | tee "$RUNNER_TEMP/policy.log"
+
+      - name: Result for the comment
+        if: always()
+        env:
+          OUTCOME: ${{ job.status }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/static"
+          if [ "$OUTCOME" = success ]; then echo "✅ pass" > "$RUNNER_TEMP/static/static.txt"
+          else echo "⛔ failed: see the static job's log" > "$RUNNER_TEMP/static/static.txt"; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: static
+          path: ${{ runner.temp }}/static/static.txt
+          retention-days: 1
+
+  plan:
+    needs: detect
+    if: needs.detect.outputs.stacks != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect.outputs.stacks) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_terraform-stack.yml
+    with:
+      stack: ${{ matrix.path }}
+      cloud: ${{ matrix.cloud }}
+      mode: plan
+    secrets: inherit
+
+  comment:
+    needs: [detect, static, plan]
+    if: always() && needs.detect.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Render
+        id: render
+        run: |
+          rc=0
+          python3 tools/ci/render_pr_comment.py "$RUNNER_TEMP/artifacts" > "$RUNNER_TEMP/comment.md" || rc=$?
+          cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        # A fork's token can't comment; its result stays in the job summary.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          header: cloudbridge-iac
+          path: ${{ runner.temp }}/comment.md
+
+      - name: Fail if a plan, a policy or a static check failed
+        env:
+          RC: ${{ steps.render.outputs.rc }}
+          PLAN: ${{ needs.plan.result }}
+          STATIC: ${{ needs.static.result }}
+        run: |
+          [ "$RC" = 0 ] || { echo "::error::Policy failed"; exit 1; }
+          [ "$STATIC" = success ] || { echo "::error::Static checks failed"; exit 1; }
+          [ "$PLAN" != failure ] || { echo "::error::A plan failed"; exit 1; }

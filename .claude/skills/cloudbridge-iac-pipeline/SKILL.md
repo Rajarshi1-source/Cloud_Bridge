@@ -21,6 +21,16 @@ Workflow files, CI-identity Terraform, the affected-stack detector and Conftest 
 
 The environment claim is what makes approvals meaningful: an apply role can only be assumed by a job that is running *inside* a protected environment, i.e. after a reviewer approved it.
 
+## As built (Week 5)
+
+Built in `.github/workflows/` and `tools/ci/`, switch-on list in `docs/runbooks/iac-pipeline.md`. Where it differs from the text below, this section wins:
+- **No `iac-engines.yml`:** `iac-checks.yml` already runs every stack on Terraform and OpenTofu.
+- **Pipeline stacks:** `aws-budget/10-foundation`, `gcp-budget/10-foundation`, `global/30-traffic`. Not `*-dev` (ephemeral), `00-ci-identity` (a person applies it) or `20-origin-tls` (its state holds a private key, and the plan identity is refused access).
+- **Saved plan between jobs:** the plan job runs outside any environment, encrypts `tfplan` with `CB_PLAN_KEY` and hands the SHA-256 to the apply job, which checks it before applying.
+- **Unconfigured means "not planned":** a stack whose identity isn't set shows that in the comment and fails nothing; a missing Infracost key reads "not measured", never zero.
+- **One-sided warning comes from plan counts, not file paths:** `modules/cell` holds both clouds' code, so a file-based check is wrong.
+- **Plan-risk gate:** Week 8, so its row isn't in the comment yet.
+
 ## Reusable stack workflow (Template Method)
 
 `_terraform-stack.yml` takes `stack`, `cloud`, `mode` (plan|apply), `env`:

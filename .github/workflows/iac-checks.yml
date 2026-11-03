@@ -6,6 +6,8 @@
 #   gitops:    helm lint + render every chart for every cell, kubeconform (incl. Argo CRDs)
 #   ansible:   ansible-lint production profile + playbook syntax check
 #   molecule:  k3s_server role converge + idempotence + verify in a container
+#   policy:    fmt, tflint, Trivy config, Conftest unit tests, CI tool tests
+#   observability: promtool (config, rules, rule tests), amtool, blackbox, dashboards, capacity tool
 name: iac-checks
 
 on:
@@ -14,6 +16,9 @@ on:
       - "infra/**"
       - "ansible/**"
       - "gitops/**"
+      - "observability/**"
+      - "tools/ci/**"
+      - "tools/load/**"
       - ".github/workflows/**"
       - "tools/dev/iac-check.sh"
       - "tools/dev/ansible-toolbox.Dockerfile"
@@ -23,6 +28,9 @@ on:
       - "infra/**"
       - "ansible/**"
       - "gitops/**"
+      - "observability/**"
+      - "tools/ci/**"
+      - "tools/load/**"
       - ".github/workflows/**"
       - "tools/dev/iac-check.sh"
       - "tools/dev/ansible-toolbox.Dockerfile"
@@ -41,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [terraform, tofu, actions, gitops, ansible, molecule]
+        check: [terraform, tofu, actions, gitops, ansible, molecule, policy, observability]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -114,9 +114,12 @@ spec:
               default: false        # origins accept 443 only (Cloudflare Full strict)
         service:
           type: LoadBalancer        # k3s ServiceLB binds 443 on the VM's address
+        # k6 at 40 RPS: at the old 128 MiB limit (118 MiB idle) Traefik spent 14 CPUs in garbage
+        # collection, failed its liveness probe, and took the cell's whole ingress down with it.
+        # The chart sets GOMEMLIMIT from this limit.
         resources:
-          requests: { cpu: 25m, memory: 48Mi }
-          limits: { memory: 128Mi }
+          requests: { cpu: 25m, memory: 96Mi }
+          limits: { memory: 256Mi }
   destination:
     server: https://kubernetes.default.svc
     namespace: traefik

@@ -22,6 +22,7 @@
     twin_revision: twin
     twin_mirror_url: http://twin-mirror:5000
     twin_registry_url: http://twin-registry:5000
+    cell_secrets_metrics_ca: "{{ lookup('ansible.builtin.file', twin_pki ~ '/ca.crt') }}"
     origin_tls_pair:
       certificate: "{{ lookup('ansible.builtin.file', twin_pki ~ '/origin.crt') }}"
       private_key: "{{ lookup('ansible.builtin.file', twin_pki ~ '/origin.key') }}"

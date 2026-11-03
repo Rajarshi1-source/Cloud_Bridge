@@ -1,0 +1,259 @@
+{
+  "description": "Can the smaller cell take everything, and how fast?",
+  "editable": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "Older than 14 days, or none at all, fires ExitPlanEvidenceStale.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "dateTimeAsIso"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT extract(epoch FROM max(finished_at)) * 1000 AS at FROM drills WHERE outcome = 'completed'",
+          "refId": "A"
+        }
+      ],
+      "title": "Last successful drill",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "Measured by the newest completed drill.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT shift_seconds FROM drills WHERE outcome = 'completed' ORDER BY finished_at DESC LIMIT 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Latest shift time",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "Capacity after pre-warm, against peak traffic. Below 1.2 the evacuation refuses to start.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT capacity_ratio_after_prewarm FROM drills WHERE outcome = 'completed' ORDER BY finished_at DESC LIMIT 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Latest capacity ratio",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "The exit-plan evidence: every number comes from a run; the day column dates it.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 4,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT started_at::date AS day, from_cell, to_cell, mode, outcome, capacity_ratio, capacity_ratio_after_prewarm, prewarm_seconds, shift_seconds, errors_during, burn_rate_max, report_path FROM drills ORDER BY started_at DESC LIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Drill history",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "Weights, burn and p95 at each step; at is when it was recorded.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 5,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT seq, at, weights, burn_rate, p95_ms, decision FROM drill_steps WHERE drill_id = (SELECT id FROM drills ORDER BY started_at DESC LIMIT 1) ORDER BY seq",
+          "refId": "A"
+        }
+      ],
+      "title": "Steps of the latest drill",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "One point per completed drill.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "noValue": "no measurement yet",
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 6,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "SELECT finished_at AS \"time\", from_cell AS metric, shift_seconds FROM drills WHERE outcome = 'completed' AND $__timeFilter(finished_at) ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Shift time trend",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": [
+    "cloudbridge"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Drills",
+  "uid": "cb-drills"
+}

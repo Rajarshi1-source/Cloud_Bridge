@@ -1,0 +1,81 @@
+# Burn-rate alerts: per-cell SLO 99.5% (budget 0.005), global SLO 99.9% (budget 0.001). Every cell alert
+# keeps cb_cell, cb_cloud and cb_env: the Event-Driven Ansible rulebook routes on them.
+groups:
+  - name: cb-slo
+    rules:
+      - alert: CellSLOBurnFast
+        expr: |
+          (cb:error_ratio:rate5m / 0.005 > 14.4)
+          and on (cb_cell)
+          (cb:error_ratio:rate1h / 0.005 > 14.4)
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.cb_cell }} is burning its error budget more than 14.4 times too fast"
+      - alert: CellSLOBurnSlow
+        expr: |
+          (cb:error_ratio:rate30m / 0.005 > 6)
+          and on (cb_cell)
+          (cb:error_ratio:rate6h / 0.005 > 6)
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.cb_cell }} is burning its error budget more than 6 times too fast"
+      - alert: GlobalSLOBurnFast
+        expr: |
+          (cb:edge_error_ratio:rate5m / 0.001 > 14.4)
+          and
+          (cb:edge_error_ratio:rate1h / 0.001 > 14.4)
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "The probe through the edge is failing"
+      - alert: EdgeLatencyHigh
+        expr: quantile_over_time(0.95, probe_duration_seconds{job="blackbox-edge"}[1h]) > 0.4
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "p95 of the probe through the edge is above 400 ms"
+
+  - name: cb-data-pipeline
+    rules:
+      # A cell that was reporting an hour ago and isn't now. An absent() can't name the missing cell.
+      - alert: CellMetricsSilent
+        expr: |
+          count by (cb_cell, cb_cloud, cb_env) (up{job="apps"} offset 1h)
+          unless on (cb_cell)
+          count by (cb_cell) (up{job="apps"})
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.cb_cell }} stopped sending metrics (agent down, cell down, or the Access token expired)"
+
+  # Evidence goes stale silently. Evidence that was never recorded is just as stale, so no data fires
+  # too. The control-plane API exposes both gauges (Weeks 6 and 7); until then these two stay firing.
+  - name: cb-evidence
+    rules:
+      - alert: ExitPlanEvidenceStale
+        expr: |
+          (time() - cb_last_drill_success_timestamp > 14 * 86400)
+          or
+          absent(cb_last_drill_success_timestamp)
+        for: 1h
+        labels:
+          severity: ticket
+        annotations:
+          summary: "No successful evacuation drill in the last 14 days"
+      - alert: CostDataStale
+        expr: |
+          (time() - cb_billing_latest_timestamp > 72 * 3600)
+          or
+          absent(cb_billing_latest_timestamp)
+        for: 1h
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Billing data is more than 72 hours old, or was never ingested"
