@@ -12,6 +12,8 @@
 #   bash tools/dev/twin.sh check           # split, affinity, API smoke through the edge
 #   bash tools/dev/twin.sh leases          # allocator, forged grants, restarts, no overselling
 #   bash tools/dev/twin.sh observe         # metrics through Access, rules, split, Grafana
+#   bash tools/dev/twin.sh parity          # inject drift one check at a time: each must fail, then restore
+#   bash tools/dev/twin.sh cost            # the ledger on sample FOCUS files in a scratch database; the real one stays empty
 #   bash tools/dev/twin.sh burn aws|gcp    # stop order-service for real: CellSLOBurnFast must page
 #   bash tools/dev/twin.sh capacity aws|gcp  # k6: per-pod RPS into gitops/cells/<cell>/capacity.yaml
 #   bash tools/dev/twin.sh outage aws|gcp  # pause a whole cell; traffic must move; then restore it
@@ -31,6 +33,7 @@ export TWIN_DIR CB_TWIN_NET="$NET" CB_TWIN_EDGE_PORT="$EDGE_PORT" CB_TWIN_REGIST
 TWIN_ACCESS_AUD=twin-admin
 TWIN_ALLOCATOR_ID=twin-allocator.access
 TWIN_METRICS_ID=twin-metrics.access
+TWIN_CP_ID=twin-cp.access
 access_issuer() { echo "http://$NET.7:443"; }
 HOST="app.$DOMAIN"
 CELLS="aws gcp"
@@ -68,22 +71,37 @@ pki() { # local stand-ins for the Cloudflare Origin CA certificate and the edge 
   issue edge "DNS:$HOST"
   issue edge-admin "DNS:admin-aws.$DOMAIN,DNS:admin-gcp.$DOMAIN"
   issue edge-metrics "DNS:metrics.$DOMAIN"
+  issue edge-cp "DNS:cp.$DOMAIN"
   chmod 0644 "$d"/*.crt "$d"/*.key   # read by the toolbox and Traefik containers; local test keys only
   echo "pki: twin CA, origin and edge certificates in $d"
 }
 
 access() { # the service tokens the Access stand-in knows: the allocator's, the metrics agents', and one the cells don't allow
   local d="$TWIN_DIR/access"; mkdir -p "$d"
-  [ -f "$d/allocator.env" ] && [ -f "$d/metrics.env" ] && return
-  # A twin from before Week 5 keeps its allocator token, so the cells' secrets don't change.
-  local secret other metrics
-  secret=$(sed -n 's/^CF_ACCESS_CLIENT_SECRET=//p' "$d/allocator.env" 2>/dev/null); secret=${secret:-$(openssl rand -hex 32)}
-  other=$(openssl rand -hex 32); metrics=$(openssl rand -hex 32)
+  [ -f "$d/allocator.env" ] && [ -f "$d/metrics.env" ] && [ -f "$d/cp.env" ] && return
+  # An older twin keeps the tokens it has, so the cells' secrets don't change.
+  local secret other metrics cp
+  saved() { sed -n 's/^CF_ACCESS_CLIENT_SECRET=//p' "$d/$1" 2>/dev/null || true; }
+  secret=$(saved allocator.env); secret=${secret:-$(openssl rand -hex 32)}
+  metrics=$(saved metrics.env); metrics=${metrics:-$(openssl rand -hex 32)}
+  cp=$(saved cp.env); cp=${cp:-$(openssl rand -hex 32)}
+  other=$(openssl rand -hex 32)
   printf 'CF_ACCESS_CLIENT_ID=%s\nCF_ACCESS_CLIENT_SECRET=%s\n' "$TWIN_ALLOCATOR_ID" "$secret" >"$d/allocator.env"
   printf 'CF_ACCESS_CLIENT_ID=%s\nCF_ACCESS_CLIENT_SECRET=%s\n' "$TWIN_METRICS_ID" "$metrics" >"$d/metrics.env"
-  printf '{"%s": "%s", "twin-other.access": "%s", "%s": "%s"}\n' "$TWIN_ALLOCATOR_ID" "$secret" "$other" "$TWIN_METRICS_ID" "$metrics" >"$d/service-tokens.json"
-  chmod 0644 "$d"/allocator.env "$d"/metrics.env "$d"/service-tokens.json   # local test tokens, read by the containers
+  printf 'CF_ACCESS_CLIENT_ID=%s\nCF_ACCESS_CLIENT_SECRET=%s\n' "$TWIN_CP_ID" "$cp" >"$d/cp.env"
+  printf '{"%s": "%s", "twin-other.access": "%s", "%s": "%s", "%s": "%s"}\n' "$TWIN_ALLOCATOR_ID" "$secret" "$other" "$TWIN_METRICS_ID" "$metrics" "$TWIN_CP_ID" "$cp" >"$d/service-tokens.json"
+  chmod 0644 "$d"/allocator.env "$d"/metrics.env "$d"/cp.env "$d"/service-tokens.json   # local test tokens, read by the containers
   echo "access: service tokens in $d"
+}
+
+control_plane_config() { # the API's bearer token and the writer's database password, for the twin only
+  local d="$TWIN_DIR/control-plane" password; mkdir -p "$d"
+  [ -f "$d/cp_writer_password" ] || openssl rand -hex 24 >"$d/cp_writer_password"
+  password=$(cat "$d/cp_writer_password")
+  if [ ! -f "$d/api.env" ]; then
+    printf 'CB_CP_TOKEN=%s\nDATABASE_URL=postgresql://cp_writer:%s@twin-cp-db:5432/controlplane\n' "$(openssl rand -hex 32)" "$password" >"$d/api.env"
+  fi
+  chmod 0644 "$d"/*   # local test values, read by the containers
 }
 
 observability_config() { # what the central stack's configuration leaves to each environment
@@ -110,7 +128,10 @@ control_plane_db() { # the control plane's real migrations, and the weights the 
     echo "control plane: applied $name"
   done
   cp_psql -d controlplane -c "ALTER ROLE cp_reader PASSWORD '$(cat "$TWIN_DIR/observability/grafana-secrets/cp_reader_password")'"
+  cp_psql -d controlplane -c "ALTER ROLE cp_writer PASSWORD '$(cat "$TWIN_DIR/control-plane/cp_writer_password")'"
   record_weights
+  compose --progress quiet --profile jobs build twin-collector
+  compose --profile jobs run --rm --no-deps twin-collector cells
 }
 
 record_weights() { # traffic_changes follows the tfvars file, as the apply workflow's POST does in production
@@ -213,6 +234,11 @@ wait_ready() {
     done
     echo "ready: cb-$cloud-local serves /healthz/cell through its own ingress"
   done
+}
+
+reload_observability() { # the files are mounted, so neither process notices they changed
+  compose kill -s HUP twin-prometheus >/dev/null 2>&1 || true
+  compose restart twin-grafana >/dev/null 2>&1 || true
 }
 
 refresh() { # tell Argo CD to fetch the new snapshot now instead of at its 3-minute poll
@@ -325,10 +351,11 @@ outage() { # the whole cell disappears, as in a cloud outage; the edge must move
 case "${1:-}" in
   up)
     mkdir -p "$TWIN_DIR"
-    pki; access; observability_config; publish; render; weights
+    pki; access; observability_config; control_plane_config; publish; render; weights
     compose --progress quiet up -d --build --remove-orphans --quiet-pull --wait twin-cp-db
     compose --progress quiet up -d --build --remove-orphans --quiet-pull
     control_plane_db
+    reload_observability
     refresh
     echo "Argo CD is installing and syncing both cells (first start: about 10 minutes)."
     wait_ready
@@ -341,7 +368,7 @@ case "${1:-}" in
       if [ -n "$(compose ps -q cell-aws 2>/dev/null)" ]; then refresh; echo "Argo CD rolls the new images out (watch: bash tools/dev/twin.sh status)"; fi
     fi
     ;;
-  sync) observability_config; publish; render; refresh; control_plane_db; echo "Argo CD re-syncs from the new snapshot (watch: bash tools/dev/twin.sh status)" ;;
+  sync) observability_config; control_plane_config; publish; render; refresh; control_plane_db; reload_observability; echo "Argo CD re-syncs from the new snapshot (watch: bash tools/dev/twin.sh status)" ;;
   weights) weights; record_weights ;;
   check) check ;;
   promote) promote ;;
@@ -350,9 +377,11 @@ case "${1:-}" in
   observe) source "$REPO/tools/dev/twin/observe.sh"; observe ;;
   burn) source "$REPO/tools/dev/twin/observe.sh"; burn "${2:-}" ;;
   capacity) source "$REPO/tools/dev/twin/observe.sh"; capacity "${2:-}" ;;
+  parity) source "$REPO/tools/dev/twin/parity.sh"; parity_drift ;;
+  cost) source "$REPO/tools/dev/twin/cost.sh"; cost_ledger ;;
   status) status ;;
   kubectl) case "${2:-}" in aws|gcp) kc "${@:2}" ;; *) echo "kubectl aws|gcp ARGS..."; exit 2 ;; esac ;;
   down) compose down; echo "stopped; cells, data and certificates kept (purge removes them)" ;;
   purge) compose down -v; as_root "rm -rf /twin/*"; echo "removed the twin's volumes and $TWIN_DIR" ;;
-  *) sed -n '2,16p' "$0"; exit 2 ;;
+  *) sed -n '2,20p' "$0"; exit 2 ;;
 esac

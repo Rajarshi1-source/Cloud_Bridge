@@ -83,6 +83,8 @@ Auth: Cloudflare Access service tokens at the edge **and** a bearer token checke
 Capacity math lives in one place (the API) so the playbook, the recommender and the dashboard agree:
 `capacity_rps(cell) = min over services( hpa_max × per_pod_rps / fanout )` from `gitops/cells/<cell>/capacity.yaml` + live HPA max; `peak_rps_7d = max_over_time(sum by (cb_cell)(cb:requests:rate5m{service="api-gateway"})[7d:5m])` summed across cells; ratio = capacity / total peak.
 
+As built (Week 6, `control-plane/api`): no cell runs kube-state-metrics, so HPA max comes from Git (chart value, or the cell's override, which Argo CD keeps live) and current replicas from `count(up{job="apps",service=…,cb_cell=…} == 1)`. Peak is filtered to the cell's `cb_env`, since the receiver can hold several. Refusals: 409 when a per-pod RPS or fanout is unmeasured or there's no traffic history, 503 when Prometheus is down. The evacuation plan reports `shortfall_replicas` rather than hiding what HPA max can't reach. The API refuses to start without `CB_CP_TOKEN`. `/healthz` and `/metrics` (`cb_billing_latest_timestamp`, `cb_last_drill_success_timestamp`, each only once it's true, because the staleness alerts rely on `absent()`) need no token. `GET /drills/latest/report.md` and `/evacuation-proposal` arrive with Weeks 7 and 8. A drill with fewer than two steps measured no shift, so `shift_seconds` is null, not 0.
+
 ## Next.js dashboard rules
 
 - Server Components fetch from the control-plane API (`cache: 'no-store'` for live panels, `revalidate: 300` for cost); client components only for interactive charts.

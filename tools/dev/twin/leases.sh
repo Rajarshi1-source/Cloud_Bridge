@@ -122,8 +122,17 @@ place_order() { # args: key, then the jar; prints "status orderId"
 check_orders() {
   local jar key first again cell cloud id code
   jar=$(mktemp); key=$(cat /proc/sys/kernel/random/uuid)
-  first=$(place_order "$key" "$jar"); id=${first#* }
+  # A cold cell's first order can outlast the gateway's 2 s read timeout, and get a 503 while it commits
+  # (local-twin.md). A client retries with the same key, so this does too, and says so. A POST that never succeeds ends the check: nothing after it would mean anything.
+  local tries=0
+  first=$(place_order "$key" "$jar")
+  until [ "${first%% *}" = 201 ] || [ "$tries" -ge 12 ]; do
+    tries=$(( tries + 1 )); sleep 5; first=$(place_order "$key" "$jar")
+  done
+  [ "$tries" -eq 0 ] || echo "     the order needed $tries retries with the same key"
+  id=${first#* }
   expect "order placed through the edge" 201 "${first%% *}"
+  [ "${first%% *}" = 201 ] || { echo "LEASE CHECK FAILED"; exit 1; }
   again=$(place_order "$key" "$jar")
   [ "$again" = "$first" ] && lease_ok "repeat POST with the same key returned the same order $id" \
     || lease_bad "repeat POST: first '$first', then '$again'"
@@ -132,8 +141,14 @@ check_orders() {
   echo "     order lives in $cell; restarting its order-service, inventory-service and postgres pods"
   kc "$cloud" -n cb-app delete pod -l 'app in (order-service,inventory-service,postgres)' --wait=false >/dev/null
   sleep 5
-  kc "$cloud" -n cb-app wait --for=condition=Ready pod -l 'app in (order-service,inventory-service,postgres)' --timeout=240s >/dev/null \
-    && lease_ok "pods are back" || lease_bad "pods did not come back in 240 s"
+  # Not kubectl wait: it fails with NotFound on any pod it listed that is deleted before it looks again.
+  local back=$(( $(date +%s) + 240 ))
+  until [ "$(kc "$cloud" -n cb-app get pods -l 'app in (order-service,inventory-service,postgres)' --no-headers 2>/dev/null | grep -c ' 1/1  *Running ')" = 3 ] \
+      && [ "$(kc "$cloud" -n cb-app get pods -l 'app in (order-service,inventory-service,postgres)' --no-headers 2>/dev/null | wc -l)" = 3 ]; do
+    [ "$(date +%s)" -lt "$back" ] || break
+    sleep 5
+  done
+  [ "$(date +%s)" -lt "$back" ] && lease_ok "pods are back" || lease_bad "pods did not come back in 240 s"
   local deadline=$(( $(date +%s) + 120 ))
   until code=$(edge_curl -s -o "$TWIN_DIR/order-body" -w '%{http_code}' -b "$jar" "$(edge_url "/orders/$id")") && [ "$code" = 200 ]; do
     [ "$(date +%s)" -lt "$deadline" ] || break

@@ -1,0 +1,25 @@
+# What must match between the two cells of an environment. Weight = how much a divergence hurts failover.
+# score = weight(match or excepted) / weight(all); anything below 1.0 is a list of specific divergences.
+version: 1
+pass_threshold: 1.0
+checks:
+  - { id: images.digests,      source: workloads.image_digests, weight: 5 }  # different code
+  - { id: flyway.version,      source: sql.flyway_version,      weight: 5 }  # different schema
+  - { id: app.config.hash,     source: workloads.config_hash,   weight: 4 }  # same code, different config
+  - { id: k8s.minor,           source: cluster.k8s_minor,       weight: 3 }
+  - { id: chart.versions,      source: argocd.chart_versions,   weight: 3 }
+  - { id: hpa.max,             source: k8s.hpa_max,             weight: 3 }  # both must be able to take 100%
+  - { id: pg.major,            source: database.major,          weight: 3 }
+  - { id: resources.requests,  source: workloads.requests,      weight: 2 }
+  - { id: networkpolicy.count, source: k8s.networkpolicy_count, weight: 2 }
+  - { id: pg.params,           source: database.params,         weight: 2 }
+  - { id: valkey.major,        source: cache.major,             weight: 2 }
+  - { id: shape.class,         source: cell.shape,              weight: 2 }
+  # Budget cells only: k3s must track the minor the managed cells run, not merely match its twin.
+  - { id: k3s.version,         source: cluster.k3s_version,     weight: 3, minor_equals: "1.36" }
+
+# Allowed to differ per cell by design; everything else in a workload's environment is hashed.
+config_hash_exclude: [CB_CELL, CB_ADMIN_HOST]
+# Only AWS needs a load balancer controller.
+chart_versions_exclude: [aws-load-balancer-controller]
+pg_params_allowlist: [max_connections, statement_timeout, idle_in_transaction_session_timeout, work_mem, shared_preload_libraries]

@@ -1,0 +1,69 @@
+# Which cells form an environment, and how to read them. "skip" states why a check doesn't apply there:
+# a check nobody can read would otherwise be unknown forever.
+budget:
+  cells:
+    cb-aws-budget:
+      adapter: k3s
+      cloud: aws
+      profile: budget
+      region: ap-south-1
+      stack: infra/live/aws-budget/10-foundation
+      shape: { vcpu: 2, mem_gib: 2, class: burstable, instance_type: t3.small }
+      kubectl: [kubectl, --context, cb-aws-budget]
+    cb-gcp-budget:
+      adapter: k3s
+      cloud: gcp
+      profile: budget
+      region: asia-south1
+      stack: infra/live/gcp-budget/10-foundation
+      shape: { vcpu: 2, mem_gib: 2, class: burstable, instance_type: e2-small }
+      kubectl: [kubectl, --context, cb-gcp-budget]
+  skip:
+    pg.params: "Postgres runs in the cluster from one chart: its parameters are the chart's"
+
+dev:
+  cells:
+    cb-aws-dev:
+      adapter: aws-managed
+      cloud: aws
+      profile: managed
+      region: ap-south-1
+      stack: infra/live/aws-dev/10-foundation
+      shape: { vcpu: 2, mem_gib: 4, class: burstable, instance_type: t3.medium }
+      kubectl: [kubectl, --context, cb-aws-dev]
+    cb-gcp-dev:
+      adapter: gcp-managed
+      cloud: gcp
+      profile: managed
+      region: asia-south1
+      stack: infra/live/gcp-dev/10-foundation
+      shape: { vcpu: 2, mem_gib: 4, class: burstable, instance_type: e2-medium }
+      kubectl: [kubectl, --context, cb-gcp-dev]
+  skip:
+    k3s.version: "managed Kubernetes"
+    pg.major: "an ephemeral cell keeps its data in the cluster (managed_data = false)"
+    pg.params: "an ephemeral cell keeps its data in the cluster (managed_data = false)"
+    valkey.major: "an ephemeral cell keeps its data in the cluster (managed_data = false)"
+
+# The twin: same charts and rings as budget, on this machine (tools/dev/twin.sh).
+local:
+  cells:
+    cb-aws-local:
+      adapter: k3s
+      cloud: aws
+      profile: budget
+      region: local
+      stack: ""
+      shape: {}
+      kubectl: [docker, compose, -f, tools/dev/twin/compose.yaml, exec, -T, cell-aws, kubectl]
+    cb-gcp-local:
+      adapter: k3s
+      cloud: gcp
+      profile: budget
+      region: local
+      stack: ""
+      shape: {}
+      kubectl: [docker, compose, -f, tools/dev/twin/compose.yaml, exec, -T, cell-gcp, kubectl]
+  skip:
+    pg.params: "Postgres runs in the cluster from one chart: its parameters are the chart's"
+    shape.class: "both cells share this machine: no shape to compare"

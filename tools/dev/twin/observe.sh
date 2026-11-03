@@ -99,6 +99,7 @@ print(len(rules), "rules," , "unhealthy:", bad or "none")')
   case "$health" in *"unhealthy: none") obs_ok "every rule evaluates" ;; *) obs_bad "rule errors: $health" ;; esac
   [ "$(prom_value 'min(probe_success{job="blackbox-edge"})')" = 1 ] && obs_ok "blackbox probe through the edge succeeds, X-CB-Cell checked" || obs_bad "blackbox probe fails"
   curl -sS -m 10 "$PROM_URL/api/v1/rules?type=alert" | grep -q '"name":"ExitPlanEvidenceStale"[^}]*' && obs_ok "alert rules loaded" || obs_bad "alert rules missing"
+  prom_query 'up{job="control-plane"} == 1' | grep -q control-plane && obs_ok "Prometheus scrapes the control-plane API" || obs_bad "Prometheus isn't scraping the control-plane API"
   prom_query 'ALERTS{alertname="ExitPlanEvidenceStale"}' | grep -q alertstate && obs_ok "ExitPlanEvidenceStale is active: no drill has ever run" || obs_bad "ExitPlanEvidenceStale isn't active, but no drill has run"
 }
 

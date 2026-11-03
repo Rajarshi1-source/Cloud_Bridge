@@ -464,6 +464,13 @@ The order follows Rev 2 §4.3 and ships first: **a public multi-cloud link by th
   - FastAPI `control-plane/api` (capacity with `÷ fanout`, drills, traffic-changes, parity snapshots, bearer + Access)
   - Next.js 16.3 dashboard `/`, `/cost`, `/parity`, each with an "as of" timestamp
 - **Done when:** the parity score is visible, and changing a chart version in one cell fails CI.
+- **Status (3 Nov 2026):** "done when" verified on the local twin and in the offline checks (`tools/dev/twin.sh parity`, `twin.sh cost`, `tools/dev/iac-check.sh parity`; results in `docs/runbooks/local-twin.md`). A chart version changed in one cell fails `iac-checks.yml`'s parity job (score 0.842) and the live check (0.914), and the score shows on the dashboard. No real cell or bill has been read. What changed from the plan above:
+  - **Thirteen checks, not twelve.** `k3s.version` joins the contract; `parity/cells.yaml` skips what doesn't apply to an environment, each with its reason. `parity/exceptions.yaml` holds only `ring-window`: a `patch-only` exception is added when a real patch difference exists, with its expiry.
+  - **`AwsManagedFacts` and `GcpManagedFacts` have run only on fixtures** (`evals/parity`, unit tests). Only `K3sFacts` has read real cells, and those are the twin's. `parity.yml` reports "not measured" until `CB_PARITY_ENABLED` is set, and how it reaches real cells is added with the first one.
+  - **Not wired.** The Argo CD notification that sends `repository_dispatch` (`argocd-synced`): `parity.yml` accepts it, and no cell sends it yet.
+  - **The ledger has run only on sample files**, in a scratch database. The real AWS export and the BigQuery view have only seen stand-ins. The twin's own ledger stays empty, so panels say "no measurement yet" and `CostDataStale` fires. OpenCost isn't deployed in any cell: its puller is tested on a fixture, and until it runs shared cost has no share to divide by, which the dashboard shows.
+  - **The API and the dashboard.** Next.js is at 16.3.8. `GET /drills/latest/report.md` and `/evacuation-proposal` come with their callers in Weeks 7 and 8. Dashboard pages beyond `/`, `/cost` and `/parity` aren't built.
+  - **Deferred again (see Week 5).** The control-plane VM, the real deployment of the central stack, API, dashboard and allocator, and the `metrics.<domain>` and `cp.<domain>` Access applications. They aren't in this week's list, and need the accounts.
 
 ### Week 7: D2 evacuation and D5 cloud canary ring (ansible-ops, gitops-delivery)
 

@@ -1,0 +1,237 @@
+# Each case: facts per cell (only the sources it needs), optional ctx and exceptions, expected statuses.
+# Every bug fixed and every check added gets a case. run_eval.py fails if a check lacks a match or a
+# divergence here.
+- name: identical-cells-every-check
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod: &base
+      workloads.image_digests: { api-gateway: "sha256:aaa", order-service: "sha256:bbb" }
+      sql.flyway_version: { orders: "2", inventory: "3" }
+      workloads.config_hash: { api-gateway: "abc", order-service: "def" }
+      cluster.k8s_minor: "1.36"
+      argocd.chart_versions: { traefik: "traefik@41.7.1" }
+      k8s.hpa_max: { api-gateway: 10, order-service: 10 }
+      database.major: "18"
+      workloads.requests: { api-gateway: { cpu: 200m, memory: 320Mi } }
+      k8s.networkpolicy_count: 9
+      database.params: { work_mem: default }
+      cache.major: "9"
+      cell.shape: { vcpu: 2, mem_gib: 4, class: burstable }
+      cluster.k3s_version: "v1.36.5+k3s1"
+    cb-gcp-prod: *base
+  expect:
+    images.digests: match
+    flyway.version: match
+    app.config.hash: match
+    k8s.minor: match
+    chart.versions: match
+    hpa.max: match
+    pg.major: match
+    resources.requests: match
+    networkpolicy.count: match
+    pg.params: match
+    valkey.major: match
+    shape.class: match
+    k3s.version: match
+
+- name: each-check-diverges
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod:
+      workloads.image_digests: { order-service: "sha256:HOTFIX" }
+      sql.flyway_version: { orders: "3", inventory: "3" }
+      workloads.config_hash: { order-service: "abc" }
+      cluster.k8s_minor: "1.35"
+      argocd.chart_versions: { traefik: "traefik@41.7.2" }
+      k8s.hpa_max: { order-service: 10 }
+      database.major: "17"
+      workloads.requests: { order-service: { cpu: 300m } }
+      k8s.networkpolicy_count: 8
+      database.params: { work_mem: "8192" }
+      cache.major: "8"
+      cell.shape: { vcpu: 2, mem_gib: 8, class: general-purpose }
+      cluster.k3s_version: "v1.36.5+k3s1"
+    cb-gcp-prod:
+      workloads.image_digests: { order-service: "sha256:bbb" }
+      sql.flyway_version: { orders: "2", inventory: "3" }
+      workloads.config_hash: { order-service: "def" }
+      cluster.k8s_minor: "1.36"
+      argocd.chart_versions: { traefik: "traefik@41.7.1" }
+      k8s.hpa_max: { order-service: 4 }
+      database.major: "18"
+      workloads.requests: { order-service: { cpu: 200m } }
+      k8s.networkpolicy_count: 9
+      database.params: { work_mem: default }
+      cache.major: "9"
+      cell.shape: { vcpu: 4, mem_gib: 16, class: general-purpose }
+      cluster.k3s_version: "v1.36.4+k3s1"
+  expect:
+    images.digests: diverged
+    flyway.version: diverged
+    app.config.hash: diverged
+    k8s.minor: diverged
+    chart.versions: diverged
+    hpa.max: diverged
+    pg.major: diverged
+    resources.requests: diverged
+    networkpolicy.count: diverged
+    pg.params: diverged
+    valkey.major: diverged
+    shape.class: diverged
+    k3s.version: diverged
+
+- name: key-order-does-not-diverge
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod:
+      workloads.image_digests: { order-service: "sha256:bbb", api-gateway: "sha256:aaa" }
+    cb-gcp-prod:
+      workloads.image_digests: { api-gateway: "sha256:aaa", order-service: "sha256:bbb" }
+  expect: { images.digests: match }
+
+- name: canary-inside-ring-window
+  now: "2026-10-08T10:30:00Z"
+  ctx:
+    canary_started_at: "2026-10-08T09:00:00Z"     # 90 minutes old
+    ring_digests:
+      cb-aws-prod: { order-service: "sha256:old" }
+      cb-gcp-prod: { order-service: "sha256:new" }
+  facts:
+    cb-aws-prod: { workloads.image_digests: { order-service: "sha256:old" } }
+    cb-gcp-prod: { workloads.image_digests: { order-service: "sha256:new" } }
+  exceptions:
+    - { check: images.digests, scope: ring-window, max_age_minutes: 120, owner: bot, reason: canary }
+  expect: { images.digests: excepted }
+
+- name: canary-stuck-past-window
+  now: "2026-10-08T12:30:00Z"
+  ctx:
+    canary_started_at: "2026-10-08T09:00:00Z"     # 210 minutes old
+    ring_digests:
+      cb-aws-prod: { order-service: "sha256:old" }
+      cb-gcp-prod: { order-service: "sha256:new" }
+  facts:
+    cb-aws-prod: { workloads.image_digests: { order-service: "sha256:old" } }
+    cb-gcp-prod: { workloads.image_digests: { order-service: "sha256:new" } }
+  exceptions:
+    - { check: images.digests, scope: ring-window, max_age_minutes: 120, owner: bot, reason: canary }
+  expect: { images.digests: diverged }
+
+# A canary being young must not hide a hotfix on the other cell, or a digest nobody released.
+- name: hotfix-during-ring-window
+  now: "2026-10-08T10:30:00Z"
+  ctx:
+    canary_started_at: "2026-10-08T09:00:00Z"
+    ring_digests:
+      cb-aws-prod: { order-service: "sha256:old" }
+      cb-gcp-prod: { order-service: "sha256:new" }
+  facts:
+    cb-aws-prod: { workloads.image_digests: { order-service: "sha256:HOTFIX" } }
+    cb-gcp-prod: { workloads.image_digests: { order-service: "sha256:new" } }
+  exceptions:
+    - { check: images.digests, scope: ring-window, max_age_minutes: 120, owner: bot, reason: canary }
+  expect: { images.digests: diverged }
+
+- name: ring-window-without-ring-files
+  now: "2026-10-08T10:30:00Z"
+  ctx: { canary_started_at: "2026-10-08T09:00:00Z" }
+  facts:
+    cb-aws-prod: { workloads.image_digests: { order-service: "sha256:old" } }
+    cb-gcp-prod: { workloads.image_digests: { order-service: "sha256:new" } }
+  exceptions:
+    - { check: images.digests, scope: ring-window, max_age_minutes: 120, owner: bot, reason: canary }
+  expect: { images.digests: diverged }
+
+- name: patch-only-honoured
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod: { cluster.k8s_minor: "1.36.2" }
+    cb-gcp-prod: { cluster.k8s_minor: "1.36.4" }
+  exceptions:
+    - { check: k8s.minor, scope: patch-only, expires: "2026-11-15", owner: ricky, reason: gke patch }
+  expect: { k8s.minor: excepted }
+
+- name: patch-only-does-not-cover-minor
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod: { cluster.k8s_minor: "1.35.6" }
+    cb-gcp-prod: { cluster.k8s_minor: "1.36.4" }
+  exceptions:
+    - { check: k8s.minor, scope: patch-only, expires: "2026-11-15", owner: ricky, reason: gke patch }
+  expect: { k8s.minor: diverged }
+
+- name: expired-exception
+  now: "2026-12-01T10:00:00Z"
+  facts:
+    cb-aws-prod: { cluster.k8s_minor: "1.36.2" }
+    cb-gcp-prod: { cluster.k8s_minor: "1.36.4" }
+  exceptions:
+    - { check: k8s.minor, scope: patch-only, expires: "2026-11-15", owner: ricky, reason: gke patch }
+  expect: { k8s.minor: diverged }
+
+- name: unscoped-exception-without-expiry-ignored
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod: { k8s.hpa_max: { order-service: 10 } }
+    cb-gcp-prod: { k8s.hpa_max: { order-service: 4 } }
+  exceptions:
+    - { check: hpa.max, owner: someone, reason: "gcp is smaller" }
+  expect: { hpa.max: diverged }
+
+- name: unowned-exception-ignored
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod: { k8s.hpa_max: { order-service: 10 } }
+    cb-gcp-prod: { k8s.hpa_max: { order-service: 4 } }
+  exceptions:
+    - { check: hpa.max, expires: "2026-12-01", reason: "nobody owns this" }
+  expect: { hpa.max: diverged }
+
+- name: unknown-scope-ignored
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod: { k8s.hpa_max: { order-service: 10 } }
+    cb-gcp-prod: { k8s.hpa_max: { order-service: 4 } }
+  exceptions:
+    - { check: hpa.max, scope: because-i-said-so, expires: "2026-12-01", owner: a, reason: b }
+  expect: { hpa.max: diverged }
+
+- name: unreadable-fact-is-unknown
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod: { sql.flyway_version: { orders: "2" } }
+    cb-gcp-prod: { sql.flyway_version: "!unavailable" }
+  expect: { flyway.version: unknown }
+
+# An exception never covers a fact nobody could read.
+- name: unknown-is-not-excepted
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod: { cluster.k8s_minor: "1.36" }
+    cb-gcp-prod: { cluster.k8s_minor: "!unavailable" }
+  exceptions:
+    - { check: k8s.minor, expires: "2026-11-15", owner: ricky, reason: covers everything }
+  expect: { k8s.minor: unknown }
+
+# Two empty lists are equal, and prove nothing: an empty namespace must not pass.
+- name: both-cells-read-nothing
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-prod: { workloads.image_digests: {}, k8s.hpa_max: {} }
+    cb-gcp-prod: { workloads.image_digests: {}, k8s.hpa_max: {} }
+  expect: { images.digests: unknown, hpa.max: unknown }
+
+# Both budget cells on the same wrong minor match each other, and are still behind the managed cells.
+- name: k3s-both-off-the-managed-minor
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-budget: { cluster.k3s_version: "v1.35.9+k3s1" }
+    cb-gcp-budget: { cluster.k3s_version: "v1.35.9+k3s1" }
+  expect: { k3s.version: diverged }
+
+- name: k3s-patch-difference-diverges
+  now: "2026-10-08T10:00:00Z"
+  facts:
+    cb-aws-budget: { cluster.k3s_version: "v1.36.5+k3s1" }
+    cb-gcp-budget: { cluster.k3s_version: "v1.36.6+k3s1" }
+  expect: { k3s.version: diverged }

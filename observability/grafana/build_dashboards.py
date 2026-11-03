@@ -124,29 +124,37 @@ def overview():
 
 
 def cost():
+    # The same query as control-plane/api/cpapi/queries.py: a service with no bill has no row (not a cost of
+    # 0), requests count only on days with that cell's bill, and currencies are never added together.
     q1 = """WITH params AS (SELECT current_date - 30 AS since, current_date AS until),
-      direct AS (SELECT c.cb_cell AS cell_id, c.cb_service AS service, sum(c.effective_cost) AS cost
-        FROM cost_line_items c, params p WHERE c.charge_category = 'Usage' AND c.cb_service IS NOT NULL
-        AND c.charge_period_start >= p.since AND c.charge_period_start < p.until GROUP BY 1, 2),
-      shared_daily AS (SELECT c.cb_cell AS cell_id, c.charge_period_start::date AS day, sum(c.effective_cost) AS cost
-        FROM cost_line_items c, params p WHERE c.charge_category = 'Usage' AND c.cb_cell IS NOT NULL AND c.cb_service IS NULL
-        AND c.charge_period_start >= p.since AND c.charge_period_start < p.until GROUP BY 1, 2),
-      shared AS (SELECT s.cell_id, a.service, sum(s.cost * a.cpu_share) AS cost
-        FROM shared_daily s JOIN allocation_daily a ON a.cell_id = s.cell_id AND a.day = s.day GROUP BY 1, 2),
-      vol AS (SELECT cell_id, service, sum(requests) AS req FROM request_volume_daily, params p
-        WHERE day >= p.since AND day < p.until GROUP BY 1, 2)
-      SELECT v.cell_id, v.service, round(coalesce(d.cost, 0) + coalesce(s.cost, 0), 2) AS cost_30d, v.req AS requests_30d,
-        round((coalesce(d.cost, 0) + coalesce(s.cost, 0)) / nullif(v.req, 0) * 1000, 6) AS cost_per_1k_req
-      FROM vol v LEFT JOIN direct d USING (cell_id, service) LEFT JOIN shared s USING (cell_id, service)
-      ORDER BY v.service, v.cell_id"""
+      usage_rows AS (SELECT c.cb_cell AS cell_id, c.cb_service AS service, (c.charge_period_start AT TIME ZONE 'UTC')::date AS day,
+        c.billing_currency AS currency, c.effective_cost FROM cost_line_items c, params p
+        WHERE c.charge_category = 'Usage' AND c.cb_cell IS NOT NULL AND c.charge_period_start >= p.since AND c.charge_period_start < p.until),
+      direct AS (SELECT cell_id, service, currency, sum(effective_cost) AS cost FROM usage_rows WHERE service IS NOT NULL GROUP BY 1, 2, 3),
+      shared_daily AS (SELECT cell_id, day, currency, sum(effective_cost) AS cost FROM usage_rows WHERE service IS NULL GROUP BY 1, 2, 3),
+      shared AS (SELECT s.cell_id, a.service, s.currency, sum(s.cost * a.cpu_share) AS cost
+        FROM shared_daily s JOIN allocation_daily a ON a.cell_id = s.cell_id AND a.day = s.day GROUP BY 1, 2, 3),
+      costs AS (SELECT cell_id, service, currency, sum(cost) AS cost FROM (SELECT * FROM direct UNION ALL SELECT * FROM shared) both_kinds GROUP BY 1, 2, 3),
+      billed_days AS (SELECT DISTINCT cell_id, day FROM usage_rows),
+      vol AS (SELECT r.cell_id, r.service, sum(r.requests) AS req FROM request_volume_daily r
+        JOIN billed_days b ON b.cell_id = r.cell_id AND b.day = r.day GROUP BY 1, 2)
+      SELECT c.cell_id, c.service, c.currency, round(c.cost, 2) AS cost_30d, v.req AS requests_30d,
+        round(c.cost / nullif(v.req, 0) * 1000, 6) AS cost_per_1k_req
+      FROM costs c LEFT JOIN vol v USING (cell_id, service) ORDER BY c.service, c.cell_id, c.currency"""
     return dashboard("cb-cost", "Cost per request", "Which cloud is cheaper per unit of work?", [
-        stat("Billing data as of", as_of("cost_ingestions", "period_start"), 8,
-             "The newest billing day ingested. Bills arrive about a day late; older than 72 hours fires CostDataStale.", "dateTimeAsIso"),
+        stat("Billing data as of", sql("""SELECT extract(epoch FROM min(latest)) * 1000 AS at FROM
+             (SELECT max(period_start)::timestamptz AS latest FROM cost_ingestions GROUP BY provider_name) per_provider"""), 8,
+             "The newest billing day of whichever cloud is further behind, so one fresh export can't hide the other going stale. Bills arrive about a day late; older than 72 hours fires CostDataStale.", "dateTimeAsIso"),
         stat("Last ingestion", as_of("cost_ingestions", "ingested_at"), 8, "When a billing file was last ingested.", "dateTimeAsIso"),
-        stat("Unallocated cost, 30 days", sql("""SELECT round(sum(effective_cost), 2) AS cost FROM cost_line_items
-             WHERE charge_category = 'Usage' AND cb_cell IS NULL AND charge_period_start >= current_date - 30"""), 8,
-             "Cost with no cb-cell tag: shown, never spread silently. " + LEDGER),
-        table("Cost per 1,000 requests", sql(q1), 24, "Directly tagged cost first, shared cost by measured share, credits excluded. " + LEDGER),
+        table("Unallocated cost, 30 days", sql("""SELECT billing_currency AS currency, round(sum(effective_cost), 2) AS cost FROM cost_line_items
+              WHERE charge_category = 'Usage' AND cb_cell IS NULL AND charge_period_start >= current_date - 30 GROUP BY 1"""), 8,
+              "Cost with no cb-cell tag: shown, never spread silently. " + LEDGER),
+        table("Cost per 1,000 requests", sql(q1), 24, "Directly tagged cost first, shared cost by measured share, credits excluded. Requests count only on days with that cell's bill. Currencies aren't compared. " + LEDGER),
+        table("Shared cost with no allocation share", sql("""SELECT c.cb_cell AS cell_id, c.billing_currency AS currency, round(sum(c.effective_cost), 2) AS cost
+              FROM cost_line_items c WHERE c.charge_category = 'Usage' AND c.cb_cell IS NOT NULL AND c.cb_service IS NULL
+              AND c.charge_period_start >= current_date - 30 AND c.charge_period_start < current_date
+              AND NOT EXISTS (SELECT 1 FROM allocation_daily a WHERE a.cell_id = c.cb_cell AND a.day = (c.charge_period_start AT TIME ZONE 'UTC')::date)
+              GROUP BY 1, 2 ORDER BY 1, 2"""), 24, "On a cell, on a day with no OpenCost share to divide it by. The table above leaves it out, so its unit costs are too low by this much. " + LEDGER),
         table("OpenCost estimate against the bill", sql("""WITH bill AS (SELECT cb_cell AS cell_id, charge_period_start::date AS day,
               sum(effective_cost) AS billed FROM cost_line_items WHERE charge_category = 'Usage' AND cb_cell IS NOT NULL GROUP BY 1, 2),
               est AS (SELECT cell_id, day, sum(opencost_estimate) AS estimated FROM allocation_daily GROUP BY 1, 2)
@@ -154,9 +162,9 @@ def cost():
               round(100 * (e.estimated / nullif(b.billed, 0) - 1), 2) AS error_pct
               FROM est e JOIN bill b USING (cell_id, day) ORDER BY e.day DESC, e.cell_id LIMIT 30"""), 12,
               "Reconciliation error per cell per day. " + LEDGER),
-        table("Unallocated cost by service", sql("""SELECT provider_name, service_name, round(sum(effective_cost), 2) AS cost
+        table("Unallocated cost by service", sql("""SELECT provider_name, service_name, billing_currency AS currency, round(sum(effective_cost), 2) AS cost
               FROM cost_line_items WHERE charge_category = 'Usage' AND cb_cell IS NULL AND charge_period_start >= current_date - 30
-              GROUP BY 1, 2 ORDER BY cost DESC LIMIT 20"""), 12, LEDGER),
+              GROUP BY 1, 2, 3 ORDER BY cost DESC LIMIT 20"""), 12, LEDGER),
     ])
 
 

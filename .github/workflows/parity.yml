@@ -1,0 +1,89 @@
+# The cells against each other, as they really run. iac-checks.yml's parity job covers what Git would deploy.
+# Off until an environment is configured: without one the run says "not measured" and never shows a pass.
+name: parity
+
+on:
+  schedule:
+    - cron: "30 21 * * *"          # 03:00 IST
+  repository_dispatch:
+    types: [argocd-synced]         # from Argo CD's notifications, once a real cell sends them
+  workflow_dispatch:
+    inputs:
+      env:
+        description: Environment in parity/cells.yaml
+        type: choice
+        options: [budget, dev]
+        default: budget
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: parity
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    env:
+      CB_ENV: ${{ inputs.env || 'budget' }}
+      CONFIGURED: ${{ vars.CB_PARITY_ENABLED }}
+      TRIGGER: ${{ github.event_name == 'schedule' && 'nightly' || (github.event_name == 'repository_dispatch' && 'post_sync' || 'manual') }}
+    steps:
+      - name: Report when nothing is configured
+        if: env.CONFIGURED != 'true'
+        run: |
+          echo "::notice::Parity was not measured: this repository has no reachable cells (CB_PARITY_ENABLED is unset)."
+          {
+            echo "### Parity: not measured"
+            echo "No cell credentials are configured, so nothing was compared. This is not a pass."
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.CONFIGURED == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: env.CONFIGURED == 'true'
+        with:
+          python-version: "3.14"
+      - name: Install the checker's dependencies
+        if: env.CONFIGURED == 'true'
+        run: pip install --disable-pip-version-check PyYAML==6.0.3 boto3==1.43.123 "psycopg[binary]==3.3.7"
+      # Reaching a cell (cloud login, a kubeconfig for the contexts in parity/cells.yaml) is added with the
+      # first real environment: nothing can be proved about it before one exists. Until then the checker
+      # reports every check as unknown and this job fails, which is the right answer.
+      - name: Compare the cells
+        id: compare
+        if: env.CONFIGURED == 'true'
+        shell: bash                # with pipefail: without it, tee would turn a failed check into a pass
+        env:
+          PYTHONPATH: control-plane/parity-checker
+          CB_CP_URL: ${{ vars.CB_CP_URL }}
+          CB_CP_TOKEN: ${{ secrets.CB_CP_TOKEN }}
+        run: |
+          post=()
+          [ -z "$CB_CP_URL" ] || post=(--post "$CB_CP_URL/parity/snapshots")
+          python -m parity check --env "$CB_ENV" --trigger "$TRIGGER" "${post[@]}" | tee parity-report.txt
+      - name: Open an issue on failure
+        if: failure() && steps.compare.conclusion == 'failure' && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "Parity failed on \`$CB_ENV\`. Run: $RUN_URL"
+            echo
+            echo '```'
+            cat parity-report.txt
+            echo '```'
+          } >body.md
+          # One open issue per environment: a divergence left overnight adds a comment, not another issue.
+          title="Parity failed on $CB_ENV"
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --label parity --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$GITHUB_REPOSITORY" --body-file body.md
+          else
+            gh label create parity --repo "$GITHUB_REPOSITORY" --force --description "Cells differ" --color B60205
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label parity --body-file body.md
+          fi

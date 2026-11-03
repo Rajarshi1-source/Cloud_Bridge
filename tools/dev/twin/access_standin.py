@@ -5,7 +5,7 @@ The edge asks /auth about every protected request (Traefik forwardAuth). A known
 the same answer Access gives: a signed RS256 JWT in Cf-Access-Jwt-Assertion, with iss, aud and
 common_name set the way the origin expects. Anything else gets 403 and never reaches the cell. Cells
 fetch the public key from /cdn-cgi/access/certs, the path Access uses. As with real Access policies,
-the metrics host admits only the metrics token, and the metrics token opens nothing else.
+the metrics and control-plane hosts each admit only their own token, and those tokens open nothing else.
 
 It proves the origin's checks, not Cloudflare's: real Access claim names must still be confirmed on a
 real team domain (docs/runbooks/local-twin.md).
@@ -29,6 +29,8 @@ AUDIENCE = os.environ["ACCESS_AUD"]
 ADMIN_HOSTS = set(os.environ["ACCESS_ADMIN_HOSTS"].split(","))
 METRICS_HOST = os.environ["ACCESS_METRICS_HOST"]
 METRICS_CLIENT_ID = os.environ["ACCESS_METRICS_CLIENT_ID"]
+CP_HOST = os.environ["ACCESS_CP_HOST"]
+CP_CLIENT_ID = os.environ["ACCESS_CP_CLIENT_ID"]
 TOKEN_LIFETIME_SECONDS = 300
 
 
@@ -120,7 +122,8 @@ class Handler(BaseHTTPRequestHandler):
         # The JWT names the id from the token file, so nothing from the request reaches a response header.
         known = next((k for k, expected in service_tokens().items()
                       if k == client_id and hmac.compare_digest(expected, secret)), None)
-        allowed = known == METRICS_CLIENT_ID if host == METRICS_HOST else host in ADMIN_HOSTS and known != METRICS_CLIENT_ID
+        owners = {METRICS_HOST: METRICS_CLIENT_ID, CP_HOST: CP_CLIENT_ID}
+        allowed = known == owners[host] if host in owners else host in ADMIN_HOSTS and known not in owners.values()
         if known and allowed:
             self.answer(200, headers={"Cf-Access-Jwt-Assertion": sign(known)})
         else:

@@ -84,6 +84,8 @@ Trade-off to state plainly: **never oversells, may briefly undersell** (stock st
 | Load shedding | gateway rejects with 503 + `Retry-After: 2` when in-flight > limit; `/healthz/cell` stays green (shedding is graceful degradation, not failure) |
 | Cache failure | inventory reads fall back to Postgres (breaker open); rate limiter falls back to a local token bucket |
 
+The first order after a restart has no margin against the gateway's 2 s read timeout: measured on the twin at 1.9 to 3.5 s with every service cold, and once 7.4 s. It can answer 503 from the fallback while the order commits. That is safe only because the client retries under the same `Idempotency-Key`, so never tell a client a 503 means the order didn't happen, and put a real order through a cell before it takes traffic.
+
 ## Migrations: expand → migrate → contract
 
 Two cells can run adjacent app versions for up to two hours (canary ring). Every Flyway migration must work with the **previous** app version: add nullable columns / new tables first (expand), backfill (migrate), and only drop or tighten in a later release after both rings run the new code (contract). The parity contract compares `flyway_schema_history` max version across cells.
