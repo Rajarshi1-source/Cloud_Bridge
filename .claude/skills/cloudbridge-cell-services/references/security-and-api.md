@@ -381,7 +381,10 @@ class SecurityConfig {
                 .bearerTokenResolver(resolver)
                 .jwt(j -> j.decoder(decoder).jwtAuthenticationConverter(converter)))
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-            .csrf(c -> c.disable())          // stateless, header-authenticated, no cookies
+            // Enabled, with only the listed routes exempt. The token repository must stay stateless: Spring's
+            // default opens an HTTP session for any anonymous POST to an unlisted route, which is a free way
+            // to fill a 2 GiB VM's memory. StatelessCsrfTokenRepository saves nothing and loads nothing.
+            .csrf(c -> c.csrfTokenRepository(new StatelessCsrfTokenRepository()).ignoringRequestMatchers(/* the listed routes */))
             .cors(c -> c.disable());         // no browser ever calls the admin API
         return http.build();
     }
@@ -406,7 +409,7 @@ class SecurityConfig {
                 .authenticationEntryPoint((req, res, ex) -> res.sendError(HttpServletResponse.SC_NOT_FOUND))
                 .accessDeniedHandler((req, res, ex) -> res.sendError(HttpServletResponse.SC_NOT_FOUND)))
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-            .csrf(c -> c.disable())
+            .csrf(c -> c.csrfTokenRepository(new StatelessCsrfTokenRepository()).ignoringRequestMatchers(/* the listed routes */))
             .cors(Customizer.withDefaults())                       // uses the CorsConfigurationSource bean
             .headers(h -> h.contentTypeOptions(Customizer.withDefaults()));
         return http.build();

@@ -60,7 +60,8 @@ class SecurityConfig {
 				.authenticationEntryPoint((req, res, ex) -> res.sendError(HttpServletResponse.SC_NOT_FOUND))
 				.accessDeniedHandler((req, res, ex) -> res.sendError(HttpServletResponse.SC_NOT_FOUND)))
 			.sessionManagement((s) -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-			.csrf((c) -> c.ignoringRequestMatchers(PATHS.matcher("/reservations/**"))); // called by order-service only
+			.csrf((c) -> c.csrfTokenRepository(new StatelessCsrfTokenRepository())
+				.ignoringRequestMatchers(PATHS.matcher("/reservations/**"))); // called by order-service only
 		return http.build();
 	}
 

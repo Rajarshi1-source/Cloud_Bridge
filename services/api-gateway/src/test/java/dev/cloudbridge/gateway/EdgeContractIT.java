@@ -57,6 +57,15 @@ class EdgeContractIT {
 	}
 
 	@Test
+	void aPostToAnUnlistedRouteIsRefusedWithoutASession() {
+		for (String path : new String[] { "/not-a-route", "/admin/leases/grant" }) {
+			HttpResponse<String> res = Http.send(Http.at(this.port, path).POST(HttpRequest.BodyPublishers.noBody()));
+			assertThat(res.statusCode()).isEqualTo(404);
+			assertThat(res.headers().firstValue("Set-Cookie")).isEmpty();
+		}
+	}
+
+	@Test
 	void unreachableUpstreamBecomesARetryable503ThenRateLimitKicksIn() {
 		String ip = "203.0.113.7";
 		for (int i = 0; i < 2; i++) {
