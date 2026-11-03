@@ -218,4 +218,4 @@ python3 evals/steering/backtest.py
 - finops-steering: "As built" section with eight corrections that would each have produced a wrong number, including Q1 showing a cost of 0 for requests with no bill and GCP batches double-counting on every rerun. V8 (`SECURITY DEFINER` partitions) and V9 (parity notes).
 - observability-dashboard: as-built capacity inputs with no kube-state-metrics, the API's refusals, gauges that exist only once true.
 - gitops-delivery: `twin.sh parity` and `twin.sh cost`.
-- cell-services: a cold cell's first order against the gateway's read timeout.
+- cell-services: a 503 from the gateway's fallback doesn't mean the order failed; warm a cold cell with a real order.

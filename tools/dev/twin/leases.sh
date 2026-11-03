@@ -122,8 +122,8 @@ place_order() { # args: key, then the jar; prints "status orderId"
 check_orders() {
   local jar key first again cell cloud id code
   jar=$(mktemp); key=$(cat /proc/sys/kernel/random/uuid)
-  # A cold cell's first order can outlast the gateway's 2 s read timeout, and get a 503 while it commits
-  # (local-twin.md). A client retries with the same key, so this does too, and says so. A POST that never succeeds ends the check: nothing after it would mean anything.
+  # An order that outlasts the gateway's 2 s read timeout gets a 503 while it commits (local-twin.md).
+  # A client retries with the same key, so this does too, and says so. A POST that never succeeds ends the check: nothing after it would mean anything.
   local tries=0
   first=$(place_order "$key" "$jar")
   until [ "${first%% *}" = 201 ] || [ "$tries" -ge 12 ]; do

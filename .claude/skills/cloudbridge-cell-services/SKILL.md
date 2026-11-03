@@ -84,7 +84,7 @@ Trade-off to state plainly: **never oversells, may briefly undersell** (stock st
 | Load shedding | gateway rejects with 503 + `Retry-After: 2` when in-flight > limit; `/healthz/cell` stays green (shedding is graceful degradation, not failure) |
 | Cache failure | inventory reads fall back to Postgres (breaker open); rate limiter falls back to a local token bucket |
 
-The first order after a restart has no margin against the gateway's 2 s read timeout: measured on the twin at 1.9 to 3.5 s with every service cold, and once 7.4 s. It can answer 503 from the fallback while the order commits. That is safe only because the client retries under the same `Idempotency-Key`, so never tell a client a 503 means the order didn't happen, and put a real order through a cell before it takes traffic.
+A 503 from the gateway's fallback doesn't mean the order failed: when order-service outlasts the 2 s read timeout, the client gets 503, then 409 on a retry, and the order still commits (reproduced on the twin by freezing order-service). That is safe only because the client retries under the same `Idempotency-Key`, so never tell a client a 503 means the order didn't happen. A cold cell's first order took 1.75 to 3.52 s on the twin, mostly the gateway's own start, against about 0.05 s warm, so put a real order through a cell before it takes traffic.
 
 ## Migrations: expand → migrate → contract
 
