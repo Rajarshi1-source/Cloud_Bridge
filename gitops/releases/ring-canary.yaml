@@ -1,8 +1,8 @@
 # GCP cell (canary ring): bot PRs land here first.
 # Bot-managed by tools/bump_ring.py. Digests only: a tag can move, a digest is what was scanned and signed.
 images:
-  api-gateway: rickyenrico01/cb-api-gateway@sha256:836c3decae59047c29302a776c85338a777e02ef55679a45f2ba4e488f7c62c0
-  order-service: rickyenrico01/cb-order-service@sha256:ad8944e0784163180ad645ee3c4d2e9e110b1ca2ec474f293019df2fc10b2e94
-  inventory-service: rickyenrico01/cb-inventory-service@sha256:f5384e7519126ac8491c3ff5b74c3876f7e3ba750452a0c848d8e574aa64fd44
-releasedAt: '2026-10-15T20:18:04Z'
-commit: 8dd8479
+  api-gateway: rickyenrico01/cb-api-gateway@sha256:202766e2ce930f9c7962da5f346e23d21eaf552a086d2d0493bea83a3413c821
+  order-service: rickyenrico01/cb-order-service@sha256:832212fd575c17738c6592c9d9cb89ae6be6c2e00c362989e46c7445727a9473
+  inventory-service: rickyenrico01/cb-inventory-service@sha256:3ea1ad30fee2ba0ecabb249806b5fb68e229e25e477bb7e8799eb9ae1b445545
+releasedAt: '2026-11-03T08:35:28Z'
+commit: 71ad26d
