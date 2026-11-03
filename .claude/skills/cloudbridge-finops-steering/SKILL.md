@@ -29,6 +29,23 @@ Idempotency: one transaction per source file — `DELETE FROM cost_line_items WH
 
 Tag normalisation: `cb-cell`, `cb-service`, `cb-env` are valid as AWS tags and GCP labels; the ledger has generated columns `cb_cell`, `cb_service` from `tags` JSONB. Untagged cost is shown as its own line ("unallocated"), never silently spread.
 
+### As built (Week 6): where the starter code is wrong
+
+`control-plane/cost-collector` and `control-plane/api/cpapi/queries.py` are the source of truth. Each of these would have produced a wrong number, so don't copy them back in:
+
+| Starter | What goes wrong | As built |
+|---|---|---|
+| GCP batch keyed by its time window | The window moves every run, so each rerun inserts the overlap again and costs double-count | One batch per UTC day: `bq://view/YYYY-MM-DD` replaces itself |
+| AWS rows filtered by date inside a file | The file is the unit of replacement, so a restatement deletes rows it then doesn't put back | Skip whole files untouched since the window; keep every row of the rest |
+| Older versions deleted from `cost_line_items` only | `cost_ingestions` keeps a record of a version that no longer exists | Delete both, with `LIKE` wildcards escaped |
+| Q1 with `coalesce(cost, 0)` from the request side | **Requests with no bill show a cost of 0 per 1k**: an invented number that looks like the cheapest cloud ever | Start from costs. No bill, no row |
+| Q1 summing all requests in the window | Two days of bill over thirty days of requests looks fifteen times cheaper | Requests count only on days with that cell's bill |
+| Q1 adding currencies | USD and INR become one meaningless sum | Grouped by currency; never compared without an FX rate |
+| Shared cost on a day with no allocation | Silently left out, so unit costs read low | Shown beside them as "shared cost with no allocation share" |
+| `cb_billing_latest_timestamp` from the newest row | One fresh export hides the other going stale | The older provider's, and no gauge until both have delivered |
+
+`ensure_cost_partitions` is `SECURITY DEFINER` (V8), because `cp_writer` must not own the table. A row older than every partition fails its whole file, and leaves no trace. OpenCost isn't deployed in any cell, so `allocation_daily` stays empty until it is, and that's what the "no allocation share" panel reports. Sample FOCUS files (`samples/make_samples.py`, currency `XXX`) load only into the scratch database of `twin.sh cost`.
+
 ## Fairness rules (each is an interview sentence)
 
 1. **Unit cost, not totals.** `cost_per_1k_req = allocated_cost / requests × 1000` per service per cell over the same window. Totals mostly measure the traffic split.

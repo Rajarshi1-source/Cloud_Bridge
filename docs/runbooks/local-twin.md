@@ -65,6 +65,8 @@ bash tools/dev/twin.sh outage aws
 | `burn aws\|gcp` | Stops order-service for real (and Argo CD, which would heal it) and sends orders at the origin until `CellSLOBurnFast` fires and reaches the Slack and EDA stand-ins, then restores both. Takes about 10 minutes. |
 | `capacity aws\|gcp` | k6 at rising rates against the cell's origin, then writes the highest step that held to `gitops/cells/<cell>/capacity.yaml`. Takes about 15 minutes. It writes to your working tree: review the diff. |
 | `outage aws\|gcp` | Pauses the whole cell (every container freezes, as in a cloud outage), measures how long until 10 of 10 requests reach the other cell, then restores it and measures the return. |
+| `parity` | Week 6: real drift in `cb-aws-local`, one check at a time (chart version, image digest, CPU request, env var, HPA max, NetworkPolicy, Flyway row), with Argo CD and Rollouts stopped on it. Each must fail exactly its own check and then be restored. A frozen `cb-gcp-local` must read as unknown, score 0. Stores snapshots, so the failures show on the dashboard. About 4 minutes. |
+| `cost` | Week 6: the ledger on made-up FOCUS files in a scratch database it drops afterwards: idempotent re-ingest, a restated file, credits, unallocated cost and unit costs worked by hand. Then that the real ledger is still empty, the volume query against real series, and the `cp.<domain>` path through Access. About 1 minute. |
 | `status` | Argo CD apps, pods and origin health per cell. |
 | `kubectl aws\|gcp ARGS…` | The cell's bundled kubectl. |
 | `down` / `purge` | Stop, keeping data and certificates / delete volumes and `~/.cache/cloudbridge-twin`. |
@@ -114,6 +116,9 @@ Plan a real go-live for these; the twin cannot fail them for you.
   the control-plane VM. The Slack and EDA deliveries reached stand-ins.
 - **The IaC pipeline**: nothing here runs GitHub Actions, OIDC or a saved-plan apply. See
   [iac-pipeline.md](iac-pipeline.md).
+- **Real billing**: the AWS Data Export, the BigQuery FOCUS view, tag spelling in a real export and OpenCost
+  have never been read. Every amount `cost` handles is made up (currency `XXX`), and none reaches the real ledger.
+- **Managed parity adapters**: `AwsManagedFacts` and `GcpManagedFacts` run on fixtures only.
 
 ## Measured on this machine (1 Nov 2026)
 
@@ -153,12 +158,28 @@ Week 5 (3 Nov 2026), service images from the working tree:
 
 **Read the capacity numbers as a lower bound.** Identical cells measured 20 and 40 RPS, and one cell 10 and 20 across runs. The failures with low latency came from an open circuit breaker after a stall in a cell sharing this machine, not from running out of capacity. The tool keeps the step before the first failure, so noise can only lower the number. The figures say nothing about a budget VM.
 
+Week 6 (3 Nov 2026), dashboard at `http://127.0.0.1:3001`, API at `http://127.0.0.1:8010`:
+
+| Run | Result |
+|---|---|
+| `parity`, drift in one live cell | Chart version 0.914, image digest 0.857, CPU request 0.943, env var 0.886, HPA max 0.914, NetworkPolicy 0.943, Flyway row 0.857. Each failed its own check and nothing else. Restored to 1.000, and no rollout started |
+| `parity`, frozen cell | All 11 checks unknown, score 0.000, exit 1 |
+| `iac-check.sh parity`, one line changed in one cell's values | Chart version 0.842, max replicas 0.842, requests 0.895, env var 0.789. Budget, dev and local are otherwise 1.000 |
+| `cost`, sample files | Re-ingest changed nothing; a restated file replaced its rows; order-service 5.0000 then 5.5000 per 1,000, api-gateway 0.5000, all as worked by hand; a credit of -100 stayed out; unallocated 5 and shared-with-no-share 7 were shown |
+| `cost`, the real ledger | Empty: `GET /cost` has no unit costs, `/metrics` no billing gauge, and `CostDataStale` fires |
+
 ## What the twin found (and what to expect)
+
+- **`iac-check.sh policy` failed now and then with the twin up, and it wasn't memory pressure as first guessed (Week 6).** Directory reads on `/mnt/d` fail with `readdirent: cannot allocate memory` while the twin runs, with over 1.4 GiB still available and no OOM kill. 25 runs each: `/mnt/d` with the twin up failed 8 times at 8 workers and once at 1 worker; a Docker volume with the twin up, and either path with it down, never failed. Why WSL's mount does this is inference (fragmentation), not proven. Every `iac-check.sh` step now reads a snapshot of the tree in a Docker volume: 12 of 12 with the twin up, and a planted unused variable is still caught. A tree walker can quietly pass on part of a tree here, so anything else that walks `/mnt/d` is suspect; `git add -A` in `publish` could miss an untracked file, though tracked ones are safe.
+- **Prometheus and Grafana kept their old config after an `up` (Week 6).** The files are mounted, so a changed scrape job never loaded, and the staleness alerts look the same either way. `up` and `sync` now reload both, and `observe` fails if the API isn't being scraped.
+- **The first order on a cold cell has no margin against the gateway's 2 s read timeout (Week 6).** `leases` got a 503 on `POST /orders` about 3 minutes after an `up` that rebuilt images. Those pods had never served an order. Metrics show the gateway's fallback answering after 5.74 s and order-service taking 7.38 s and **returning 201**: the order was committed while the client saw a 503, and the retry found the key still in progress. It wasn't an open breaker, which needs 20 calls when that route had seen 2. Measured since, first order after restarting all three services: 1.88 s on an idle machine, then 2.37, 2.37 and 3.52 s just after a Next.js build; with only order and inventory restarted, about 0.7 s; warm, about 0.05 s. All of those returned 201, and a repeat with the same key returned the same order. The 7.38 s itself was not reproduced: those pods had sat idle for 83 minutes and the restarted ones for 30 s, so paged-out memory is a suspicion, not a finding. **Expect this on a real cell:** after a restart or a scale-up, an early order can get a 503 and still commit. The same key is safe to retry, and Week 7's pre-warm should put a real order through before a cell takes traffic. `leases` now retries with the same key and prints how many retries it took. Before this, a failed POST printed "ok, same order", because the two error bodies matched.
+- **`kubectl wait` failed `leases` on a pod it had just seen deleted (Week 6).** The check now polls for three running pods.
+- **The volume job finds nothing until Prometheus is a day old.** It reads whole UTC days and today isn't over. `cost` proves the queries against today so far, and writes nothing.
 
 - **Traefik took the whole ingress down under load (Week 5).** Its 128 MiB limit left almost nothing above its 118 MiB idle use, and the chart sets `GOMEMLIMIT` from the limit. At 40 RPS it spent 14 CPUs in garbage collection, failed its liveness probe and refused connections. At 256 MiB it peaked at 186 MiB through 80 RPS with no restarts. The chart already sets that variable, so adding your own gives a duplicate entry and Argo CD stops comparing the app.
 - **The observed split read 50/50 with no users (Week 5).** The allocator's admin calls reach each cell whatever the weights say. The rule now counts user routes only, and no user traffic means no data.
 - **A stat panel can't show a timestamp (Week 5).** It printed "no measurement yet" with data in hand. Those queries now return epoch milliseconds, and `observe` fails if a stat panel has no number.
-- **Grafana kept serving old dashboards after they were regenerated.** After changing `observability/grafana/dashboards/`, restart `twin-grafana`.
+- **Grafana kept serving old dashboards after they were regenerated.** `up` and `sync` now restart `twin-grafana`.
 
 - **Rollouts and the postgres StatefulSet stayed OutOfSync forever** with Argo CD's default
   client-side diff. The HPA owns a Rollout's `spec.replicas` through the scale subresource, and the

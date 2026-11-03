@@ -70,6 +70,8 @@ services:
       ACCESS_ADMIN_HOSTS: admin-aws.${CB_TWIN_DOMAIN:-cloudbridge.example},admin-gcp.${CB_TWIN_DOMAIN:-cloudbridge.example}
       ACCESS_METRICS_HOST: metrics.${CB_TWIN_DOMAIN:-cloudbridge.example}
       ACCESS_METRICS_CLIENT_ID: twin-metrics.access
+      ACCESS_CP_HOST: cp.${CB_TWIN_DOMAIN:-cloudbridge.example}
+      ACCESS_CP_CLIENT_ID: twin-cp.access
     volumes:
       - ./access_standin.py:/app/access_standin.py:ro
       - ${TWIN_DIR}/access:/access
@@ -117,6 +119,61 @@ services:
       twin-cp-db:
         condition: service_healthy
     restart: unless-stopped
+    networks: [twin]
+
+  # The control plane's API and dashboard. Published on 127.0.0.1 like Grafana; cp.<domain> is the Access path.
+  twin-api:
+    build: ../../../control-plane/api
+    image: cloudbridge/cp-api:local
+    env_file:
+      - path: ${TWIN_DIR}/control-plane/api.env
+        required: false
+    environment:
+      CB_REPO_DIR: /repo
+      CB_PROM_URL: http://prometheus:9090
+      CB_ENV: local
+    ports: ["127.0.0.1:${CB_TWIN_API_PORT:-8010}:8010"]
+    volumes:
+      - ../../../gitops:/repo/gitops:ro
+      - ../../../infra/live/global/30-traffic:/repo/infra/live/global/30-traffic:ro
+    mem_limit: 192m
+    depends_on:
+      twin-cp-db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      twin:
+        aliases: [control-plane-api]
+
+  twin-dashboard:
+    build: ../../../control-plane/dashboard
+    image: cloudbridge/cp-dashboard:local
+    env_file:
+      - path: ${TWIN_DIR}/control-plane/api.env
+        required: false
+    environment:
+      CP_API_URL: http://control-plane-api:8010
+    ports: ["127.0.0.1:${CB_TWIN_DASHBOARD_PORT:-3001}:3001"]
+    mem_limit: 192m
+    depends_on: [twin-api]
+    restart: unless-stopped
+    networks: [twin]
+
+  # Runs when asked (twin.sh), as the daily job would. No billing source is configured here, so it writes
+  # only what is measured: the cells, and yesterday's requests from Prometheus.
+  twin-collector:
+    profiles: [jobs]
+    build: ../../../control-plane/cost-collector
+    image: cloudbridge/cost-collector:local
+    env_file:
+      - path: ${TWIN_DIR}/control-plane/api.env
+        required: false
+    environment:
+      CB_PROM_URL: http://prometheus:9090
+      CB_CELLS_FILE: /parity/cells.yaml
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../../../parity:/parity:ro
     networks: [twin]
 
   # The central observability stack: the configuration in observability/, unchanged. Only its secrets

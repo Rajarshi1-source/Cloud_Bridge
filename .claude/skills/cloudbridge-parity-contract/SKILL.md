@@ -75,6 +75,19 @@ The checker **never changes a cell**. Fixing a divergence is a normal PR — Ter
 
 `env: budget` contracts drop managed-only checks (`pg.params` from RDS/Cloud SQL APIs) and add `k3s.version` against the managed minor. Budget and managed are compared within their own env, never against each other.
 
+## As built (Week 6): where the starter code is wrong
+
+The code in `control-plane/parity-checker` and `parity/` is the source of truth; `references/starter-code.md` was the first sketch. Fixes it needed, so don't copy them back in:
+
+| Starter | Why it's wrong | As built |
+|---|---|---|
+| `max(version)` on `flyway_schema_history` | The column is text, so 9 ranks above 10 | Latest by `installed_rank`, per schema (`orders`, `inventory`), since each service has its own history |
+| Config hash over ConfigMaps only | This repo's config lives in pod env | Hash the Rollouts' env too, minus `config_hash_exclude` |
+| Chart version from the synced commit | Two healthy cells sit a poll apart, which read as drift | `chart@version` or `path@targetRevision`, never the revision synced |
+| RDS parameters against Cloud SQL flags, raw | RDS lists all, Cloud SQL only what's set, so they'd diverge forever | Each becomes "what someone set, or `default`" (RDS `Source = user`) |
+
+Also: `parity/cells.yaml` says which cells form an environment, how to reach them, and which checks don't apply (a stated `skip` reason, so a check nobody can read isn't unknown forever). `k3s.version` is compared by minor (`minor_equals`). Static mode (`python -m parity static`, in `iac-check.sh parity`) leaves out image digests, or a merged canary would fail unrelated PRs; it is what makes "a chart version changed in one cell fails CI" true on every PR, while `parity.yml` and `twin.sh parity` check running cells. A `parity.yml` step that pipes to `tee` needs `shell: bash` for pipefail, or a failed check reads as a pass.
+
 ## Interview soundbites
 
 - "Terraform drift tells me a stack differs from its code; Argo tells me a cluster differs from Git. Neither tells me AWS differs from GCP — and that's the drift that breaks failover."

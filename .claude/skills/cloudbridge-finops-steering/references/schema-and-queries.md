@@ -281,6 +281,8 @@ A default partition is deliberately **not** created: a row outside every range s
 -- Q1. Cost per 1,000 requests per service per cell (headline panel)
 --     Directly tagged costs (cb-service set: DB, cache, LB) attach to that service;
 --     untagged-to-service cell costs (nodes, NAT, control plane) split by OpenCost CPU share.
+--     SUPERSEDED: as written this shows a cost of 0 for requests with no bill, counts requests on days
+--     with no bill, and adds currencies. Use control-plane/api/cpapi/queries.py (see SKILL.md, "As built").
 WITH params AS (
   SELECT current_date - 30 AS since, current_date AS until
 ),

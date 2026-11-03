@@ -13,6 +13,7 @@ Cloudflare behaviour it reproduces:
   - Full (strict) TLS to the origin, verified against the twin's origin CA
   - admin-<cloud> hosts that go straight to one cell, behind Access (access_standin.py)
   - metrics.<domain>, the central receiver's write path only, behind Access
+  - cp.<domain>, the control plane's dashboard and (under /api) its API, behind Access
 Differences, on purpose: the monitor runs every 10 s instead of 60 s and from one place instead of
 two regions, so drills finish in seconds.
 
@@ -108,6 +109,22 @@ def render(domain: str, weights: dict[str, int]) -> dict:
         "tls": {},
     }
     services["central-prometheus"] = {"loadBalancer": {"servers": [{"url": "http://twin-prometheus:9090"}]}}
+    routers["cp"] = {
+        "rule": f"Host(`cp.{domain}`)",
+        "entryPoints": ["websecure"],
+        "middlewares": ["access"],
+        "service": "cp-dashboard",
+        "tls": {},
+    }
+    routers["cp-api"] = {
+        "rule": f"Host(`cp.{domain}`) && PathPrefix(`/api`)",
+        "entryPoints": ["websecure"],
+        "middlewares": ["access", "cp-api-prefix"],
+        "service": "cp-api",
+        "tls": {},
+    }
+    services["cp-dashboard"] = {"loadBalancer": {"servers": [{"url": "http://twin-dashboard:3001"}]}}
+    services["cp-api"] = {"loadBalancer": {"servers": [{"url": "http://control-plane-api:8010"}]}}
     return {
         "http": {
             "routers": routers,
@@ -117,7 +134,8 @@ def render(domain: str, weights: dict[str, int]) -> dict:
                         "address": "http://twin-access:443/auth",
                         "authResponseHeaders": ["Cf-Access-Jwt-Assertion"],
                     }
-                }
+                },
+                "cp-api-prefix": {"stripPrefix": {"prefixes": ["/api"]}},
             },
             "services": services,
             "serversTransports": transports,
@@ -127,6 +145,7 @@ def render(domain: str, weights: dict[str, int]) -> dict:
                 {"certFile": "/pki/edge.crt", "keyFile": "/pki/edge.key"},
                 {"certFile": "/pki/edge-admin.crt", "keyFile": "/pki/edge-admin.key"},
                 {"certFile": "/pki/edge-metrics.crt", "keyFile": "/pki/edge-metrics.key"},
+                {"certFile": "/pki/edge-cp.crt", "keyFile": "/pki/edge-cp.key"},
             ],
         },
     }

@@ -7,7 +7,7 @@
         "type": "grafana-postgresql-datasource",
         "uid": "controlplane"
       },
-      "description": "The newest billing day ingested. Bills arrive about a day late; older than 72 hours fires CostDataStale.",
+      "description": "The newest billing day of whichever cloud is further behind, so one fresh export can't hide the other going stale. Bills arrive about a day late; older than 72 hours fires CostDataStale.",
       "fieldConfig": {
         "defaults": {
           "noValue": "no measurement yet",
@@ -46,7 +46,7 @@
           },
           "editorMode": "code",
           "format": "table",
-          "rawSql": "SELECT extract(epoch FROM max(period_start)) * 1000 AS at FROM cost_ingestions",
+          "rawSql": "SELECT extract(epoch FROM min(latest)) * 1000 AS at FROM (SELECT max(period_start)::timestamptz AS latest FROM cost_ingestions GROUP BY provider_name) per_provider",
           "refId": "A"
         }
       ],
@@ -117,19 +117,13 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 8,
         "w": 8,
         "x": 16,
         "y": 0
       },
       "id": 3,
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
+      "options": {},
       "targets": [
         {
           "datasource": {
@@ -138,19 +132,19 @@
           },
           "editorMode": "code",
           "format": "table",
-          "rawSql": "SELECT round(sum(effective_cost), 2) AS cost FROM cost_line_items WHERE charge_category = 'Usage' AND cb_cell IS NULL AND charge_period_start >= current_date - 30",
+          "rawSql": "SELECT billing_currency AS currency, round(sum(effective_cost), 2) AS cost FROM cost_line_items WHERE charge_category = 'Usage' AND cb_cell IS NULL AND charge_period_start >= current_date - 30 GROUP BY 1",
           "refId": "A"
         }
       ],
       "title": "Unallocated cost, 30 days",
-      "type": "stat"
+      "type": "table"
     },
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "controlplane"
       },
-      "description": "Directly tagged cost first, shared cost by measured share, credits excluded. From the control-plane ledger; see the 'billing data as of' panel for how old it is.",
+      "description": "Directly tagged cost first, shared cost by measured share, credits excluded. Requests count only on days with that cell's bill. Currencies aren't compared. From the control-plane ledger; see the 'billing data as of' panel for how old it is.",
       "fieldConfig": {
         "defaults": {
           "noValue": "no measurement yet"
@@ -161,7 +155,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 4
+        "y": 8
       },
       "id": 4,
       "options": {},
@@ -173,11 +167,46 @@
           },
           "editorMode": "code",
           "format": "table",
-          "rawSql": "WITH params AS (SELECT current_date - 30 AS since, current_date AS until), direct AS (SELECT c.cb_cell AS cell_id, c.cb_service AS service, sum(c.effective_cost) AS cost FROM cost_line_items c, params p WHERE c.charge_category = 'Usage' AND c.cb_service IS NOT NULL AND c.charge_period_start >= p.since AND c.charge_period_start < p.until GROUP BY 1, 2), shared_daily AS (SELECT c.cb_cell AS cell_id, c.charge_period_start::date AS day, sum(c.effective_cost) AS cost FROM cost_line_items c, params p WHERE c.charge_category = 'Usage' AND c.cb_cell IS NOT NULL AND c.cb_service IS NULL AND c.charge_period_start >= p.since AND c.charge_period_start < p.until GROUP BY 1, 2), shared AS (SELECT s.cell_id, a.service, sum(s.cost * a.cpu_share) AS cost FROM shared_daily s JOIN allocation_daily a ON a.cell_id = s.cell_id AND a.day = s.day GROUP BY 1, 2), vol AS (SELECT cell_id, service, sum(requests) AS req FROM request_volume_daily, params p WHERE day >= p.since AND day < p.until GROUP BY 1, 2) SELECT v.cell_id, v.service, round(coalesce(d.cost, 0) + coalesce(s.cost, 0), 2) AS cost_30d, v.req AS requests_30d, round((coalesce(d.cost, 0) + coalesce(s.cost, 0)) / nullif(v.req, 0) * 1000, 6) AS cost_per_1k_req FROM vol v LEFT JOIN direct d USING (cell_id, service) LEFT JOIN shared s USING (cell_id, service) ORDER BY v.service, v.cell_id",
+          "rawSql": "WITH params AS (SELECT current_date - 30 AS since, current_date AS until), usage_rows AS (SELECT c.cb_cell AS cell_id, c.cb_service AS service, (c.charge_period_start AT TIME ZONE 'UTC')::date AS day, c.billing_currency AS currency, c.effective_cost FROM cost_line_items c, params p WHERE c.charge_category = 'Usage' AND c.cb_cell IS NOT NULL AND c.charge_period_start >= p.since AND c.charge_period_start < p.until), direct AS (SELECT cell_id, service, currency, sum(effective_cost) AS cost FROM usage_rows WHERE service IS NOT NULL GROUP BY 1, 2, 3), shared_daily AS (SELECT cell_id, day, currency, sum(effective_cost) AS cost FROM usage_rows WHERE service IS NULL GROUP BY 1, 2, 3), shared AS (SELECT s.cell_id, a.service, s.currency, sum(s.cost * a.cpu_share) AS cost FROM shared_daily s JOIN allocation_daily a ON a.cell_id = s.cell_id AND a.day = s.day GROUP BY 1, 2, 3), costs AS (SELECT cell_id, service, currency, sum(cost) AS cost FROM (SELECT * FROM direct UNION ALL SELECT * FROM shared) both_kinds GROUP BY 1, 2, 3), billed_days AS (SELECT DISTINCT cell_id, day FROM usage_rows), vol AS (SELECT r.cell_id, r.service, sum(r.requests) AS req FROM request_volume_daily r JOIN billed_days b ON b.cell_id = r.cell_id AND b.day = r.day GROUP BY 1, 2) SELECT c.cell_id, c.service, c.currency, round(c.cost, 2) AS cost_30d, v.req AS requests_30d, round(c.cost / nullif(v.req, 0) * 1000, 6) AS cost_per_1k_req FROM costs c LEFT JOIN vol v USING (cell_id, service) ORDER BY c.service, c.cell_id, c.currency",
           "refId": "A"
         }
       ],
       "title": "Cost per 1,000 requests",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "controlplane"
+      },
+      "description": "On a cell, on a day with no OpenCost share to divide it by. The table above leaves it out, so its unit costs are too low by this much. From the control-plane ledger; see the 'billing data as of' panel for how old it is.",
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "no measurement yet"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "controlplane"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT c.cb_cell AS cell_id, c.billing_currency AS currency, round(sum(c.effective_cost), 2) AS cost FROM cost_line_items c WHERE c.charge_category = 'Usage' AND c.cb_cell IS NOT NULL AND c.cb_service IS NULL AND c.charge_period_start >= current_date - 30 AND c.charge_period_start < current_date AND NOT EXISTS (SELECT 1 FROM allocation_daily a WHERE a.cell_id = c.cb_cell AND a.day = (c.charge_period_start AT TIME ZONE 'UTC')::date) GROUP BY 1, 2 ORDER BY 1, 2",
+          "refId": "A"
+        }
+      ],
+      "title": "Shared cost with no allocation share",
       "type": "table"
     },
     {
@@ -196,9 +225,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 12
+        "y": 24
       },
-      "id": 5,
+      "id": 6,
       "options": {},
       "targets": [
         {
@@ -231,9 +260,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 12
+        "y": 24
       },
-      "id": 6,
+      "id": 7,
       "options": {},
       "targets": [
         {
@@ -243,7 +272,7 @@
           },
           "editorMode": "code",
           "format": "table",
-          "rawSql": "SELECT provider_name, service_name, round(sum(effective_cost), 2) AS cost FROM cost_line_items WHERE charge_category = 'Usage' AND cb_cell IS NULL AND charge_period_start >= current_date - 30 GROUP BY 1, 2 ORDER BY cost DESC LIMIT 20",
+          "rawSql": "SELECT provider_name, service_name, billing_currency AS currency, round(sum(effective_cost), 2) AS cost FROM cost_line_items WHERE charge_category = 'Usage' AND cb_cell IS NULL AND charge_period_start >= current_date - 30 GROUP BY 1, 2, 3 ORDER BY cost DESC LIMIT 20",
           "refId": "A"
         }
       ],

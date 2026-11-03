@@ -1,0 +1,6 @@
+# Exceptions are loans: every one has an owner, a reason, and an expiry or a scope the code re-evaluates.
+- check: images.digests
+  scope: ring-window            # only while each cell runs its own ring's digests and the canary is young
+  max_age_minutes: 120
+  reason: "The canary ring runs the new digest on GCP before promotion"
+  owner: release-bot

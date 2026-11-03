@@ -8,6 +8,8 @@
 #   molecule:  k3s_server role converge + idempotence + verify in a container
 #   policy:    fmt, tflint, Trivy config, Conftest unit tests, CI tool tests
 #   observability: promtool (config, rules, rule tests), amtool, blackbox, dashboards, capacity tool
+#   parity:    the eval gate, then both cells of each environment as Git would deploy them: a chart
+#              version changed in one cell fails here
 name: iac-checks
 
 on:
@@ -19,6 +21,9 @@ on:
       - "observability/**"
       - "tools/ci/**"
       - "tools/load/**"
+      - "parity/**"
+      - "evals/parity/**"
+      - "control-plane/parity-checker/**"
       - ".github/workflows/**"
       - "tools/dev/iac-check.sh"
       - "tools/dev/ansible-toolbox.Dockerfile"
@@ -31,6 +36,9 @@ on:
       - "observability/**"
       - "tools/ci/**"
       - "tools/load/**"
+      - "parity/**"
+      - "evals/parity/**"
+      - "control-plane/parity-checker/**"
       - ".github/workflows/**"
       - "tools/dev/iac-check.sh"
       - "tools/dev/ansible-toolbox.Dockerfile"
@@ -49,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [terraform, tofu, actions, gitops, ansible, molecule, policy, observability]
+        check: [terraform, tofu, actions, gitops, ansible, molecule, policy, observability, parity]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

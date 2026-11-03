@@ -212,3 +212,10 @@ python3 evals/steering/backtest.py
 - observability-dashboard: "As built" section. Agent values, canary analysis against the central receiver, origin-side split, `CellMetricsSilent`, stat panels need numbers, `measure_capacity.py`.
 - cell-services: CSRF stays on with `StatelessCsrfTokenRepository`, because Spring's default opens a session for any anonymous POST to an unlisted route.
 - finops-steering: control-plane migrations extracted, with reader and writer roles.
+
+**2026-11-03 — parity-contract, finops-steering, observability-dashboard, gitops-delivery (Week 6, verified on the twin)**
+- parity-contract: "As built" section. Flyway by `installed_rank` per schema, config hash over pod env, chart versions without the synced commit, RDS and Cloud SQL parameters reduced to "what someone set". `parity/cells.yaml`, static mode for PRs, thirteen checks.
+- finops-steering: "As built" section with eight corrections that would each have produced a wrong number, including Q1 showing a cost of 0 for requests with no bill and GCP batches double-counting on every rerun. V8 (`SECURITY DEFINER` partitions) and V9 (parity notes).
+- observability-dashboard: as-built capacity inputs with no kube-state-metrics, the API's refusals, gauges that exist only once true.
+- gitops-delivery: `twin.sh parity` and `twin.sh cost`.
+- cell-services: a cold cell's first order against the gateway's read timeout.

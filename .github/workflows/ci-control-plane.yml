@@ -1,4 +1,4 @@
-# Unit tests of the control-plane Python that has no database or cloud dependency in its tests.
+# Unit tests of the control plane that have no database or cloud dependency, and the dashboard's build.
 name: ci-control-plane
 
 on:
@@ -28,3 +28,54 @@ jobs:
       - name: Lease allocator unit tests
         working-directory: control-plane/allocator
         run: python -m unittest discover -s tests
+
+  parity-checker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: pip install --disable-pip-version-check PyYAML==6.0.3
+      - name: Parity checker unit tests
+        working-directory: control-plane/parity-checker
+        run: python -m unittest discover -s tests
+
+  cost-collector:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: pip install --disable-pip-version-check pyarrow==26.0.0
+      - name: Cost collector unit tests
+        working-directory: control-plane/cost-collector
+        run: python -m unittest discover -s tests
+
+  api:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: pip install --disable-pip-version-check fastapi==0.162.0 httpx==0.28.1 "psycopg[binary]==3.3.7" PyYAML==6.0.3
+      - name: Control-plane API unit tests
+        working-directory: control-plane/api
+        run: python -m unittest discover -s tests
+
+  dashboard:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Dashboard tests and production build
+        run: docker build control-plane/dashboard
