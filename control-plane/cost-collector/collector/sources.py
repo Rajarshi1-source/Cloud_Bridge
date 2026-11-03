@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import pathlib
 import re
@@ -12,9 +11,15 @@ from .model import Batch, row_from_focus
 
 
 def rows_from_parquet(body: bytes, provider: str):
+    import pyarrow
     import pyarrow.parquet as parquet
 
-    return [row_from_focus(record, provider) for record in parquet.read_table(io.BytesIO(body)).to_pylist()]
+    # Copied into Arrow's memory: an Arrow pool thread left holding a Python object needs the GIL to drop it,
+    # and that deadlocks with Python 3.14 at exit (pyarrow 26, Linux), whatever the read's options.
+    sink = pyarrow.BufferOutputStream()
+    sink.write(body)
+    table = parquet.read_table(pyarrow.BufferReader(sink.getvalue()))
+    return [row_from_focus(record, provider) for record in table.to_pylist()]
 
 
 class AwsFocusSource:
