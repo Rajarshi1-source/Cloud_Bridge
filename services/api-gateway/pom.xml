@@ -5,7 +5,7 @@
 	<parent>
 		<groupId>org.springframework.boot</groupId>
 		<artifactId>spring-boot-starter-parent</artifactId>
-		<version>4.1.1</version>
+		<version>4.1.2</version>
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
 	<groupId>dev.cloudbridge</groupId>
@@ -33,7 +33,7 @@
 		<tomcat.version>11.0.25</tomcat.version>              <!-- CVE-2026-65182 (CRITICAL) -->
 		<jackson-bom.version>3.1.7</jackson-bom.version>       <!-- CVE-2026-89407, CVE-2026-68497 -->
 		<jackson-2-bom.version>2.21.7</jackson-2-bom.version>  <!-- same CVEs, Jackson 2 line -->
-		<spring-cloud.version>2025.1.3</spring-cloud.version>
+		<spring-cloud.version>2025.1.4</spring-cloud.version>
 	</properties>
 	<dependencies>
 		<dependency>
